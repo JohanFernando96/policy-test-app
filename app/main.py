@@ -1,13 +1,15 @@
-from fastapi import FastAPI, UploadFile, File, Depends, HTTPException
+from fastapi import FastAPI, UploadFile, File, Depends, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
 from sqlalchemy.orm import Session
 import os
 import shutil
 import sys
+import json
+import traceback
+
 from app.services.pdf_processor import pdf_processor
 from app.services.vector_service import vector_service
-import os
-import json
 
 # Add the parent directory to Python path
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -25,6 +27,24 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+
+@app.exception_handler(Exception)
+async def global_exception_handler(request: Request, exc: Exception):
+    """Global exception handler to catch all unhandled exceptions"""
+    error_msg = f"Global exception: {type(exc).__name__}: {str(exc)}"
+
+    # Log the full error details
+    print(f"🚨 GLOBAL EXCEPTION: {error_msg}")
+    print(f"📍 Full traceback:\n{traceback.format_exc()}")
+
+    return JSONResponse(
+        status_code=500,
+        content={
+            "detail": error_msg,
+            "path": str(request.url)
+        }
+    )
 
 # Create tables on startup
 @app.on_event("startup")
@@ -184,25 +204,47 @@ async def process_document(doc_id: int, db: Session = Depends(get_db)):
 
         # Process the document with detailed error handling
         print("🚀 Starting PDF processing...")
+
+        # Step 1: Extract text
+        print("📄 Step 1: Extracting text from PDF...")
         try:
-            # Step 1: Extract text
-            print("📄 Step 1: Extracting text from PDF...")
             text = pdf_processor.extract_text_from_pdf(file_path)
             print(f"✅ Text extraction complete: {len(text):,} characters")
+        except Exception as e:
+            error_msg = f"Text extraction failed: {type(e).__name__}: {str(e)}"
+            print(f"❌ {error_msg}")
+            doc.status = "error"
+            db.commit()
+            raise HTTPException(status_code=500, detail=error_msg)
 
-            # Step 2: Create chunks
-            print("✂️ Step 2: Creating text chunks...")
+        # Step 2: Create chunks
+        print("✂️ Step 2: Creating text chunks...")
+        try:
             chunks = pdf_processor.chunk_text(text)
             print(f"✅ Chunking complete: {len(chunks)} chunks created")
+        except Exception as e:
+            error_msg = f"Text chunking failed: {type(e).__name__}: {str(e)}"
+            print(f"❌ {error_msg}")
+            doc.status = "error"
+            db.commit()
+            raise HTTPException(status_code=500, detail=error_msg)
 
-            # Step 3: Generate embeddings
-            print("🧠 Step 3: Generating embeddings...")
+        # Step 3: Generate embeddings
+        print("🧠 Step 3: Generating embeddings...")
+        try:
             chunk_texts = [chunk["content"] for chunk in chunks]
             embeddings = pdf_processor.generate_embeddings(chunk_texts)
             print(f"✅ Embeddings complete: {len(embeddings)} embeddings generated")
+        except Exception as e:
+            error_msg = f"Embedding generation failed: {type(e).__name__}: {str(e)}"
+            print(f"❌ {error_msg}")
+            doc.status = "error"
+            db.commit()
+            raise HTTPException(status_code=500, detail=error_msg)
 
-            # Step 4: Prepare metadata
-            print("📊 Step 4: Preparing metadata...")
+        # Step 4: Prepare metadata
+        print("📊 Step 4: Preparing metadata...")
+        try:
             metadata_list = []
             for i, chunk in enumerate(chunks):
                 metadata = {
@@ -214,14 +256,28 @@ async def process_document(doc_id: int, db: Session = Depends(get_db)):
                 }
                 metadata_list.append(metadata)
             print(f"✅ Metadata prepared for {len(metadata_list)} chunks")
+        except Exception as e:
+            error_msg = f"Metadata preparation failed: {type(e).__name__}: {str(e)}"
+            print(f"❌ {error_msg}")
+            doc.status = "error"
+            db.commit()
+            raise HTTPException(status_code=500, detail=error_msg)
 
-            # Step 5: Store in Qdrant
-            print("💾 Step 5: Storing embeddings in Qdrant...")
+        # Step 5: Store in Qdrant
+        print("💾 Step 5: Storing embeddings in Qdrant...")
+        try:
             vector_ids = vector_service.add_embeddings(embeddings, metadata_list)
             print(f"✅ Stored {len(vector_ids)} embeddings in Qdrant")
+        except Exception as e:
+            error_msg = f"Vector storage failed: {type(e).__name__}: {str(e)}"
+            print(f"❌ {error_msg}")
+            doc.status = "error"
+            db.commit()
+            raise HTTPException(status_code=500, detail=error_msg)
 
-            # Step 6: Update database
-            print("📝 Step 6: Updating document status...")
+        # Step 6: Update database
+        print("📝 Step 6: Updating document status...")
+        try:
             doc.status = "processed"
             doc.document_metadata = json.dumps({
                 "chunks_created": len(chunks),
@@ -230,31 +286,30 @@ async def process_document(doc_id: int, db: Session = Depends(get_db)):
             })
             db.commit()
             print("✅ Document status updated to 'processed'")
+        except Exception as e:
+            error_msg = f"Database update failed: {type(e).__name__}: {str(e)}"
+            print(f"❌ {error_msg}")
+            raise HTTPException(status_code=500, detail=error_msg)
 
-            return {
-                "message": "Document processed successfully",
-                "chunks_created": len(chunks),
-                "embeddings_stored": len(vector_ids)
-            }
-
-        except Exception as processing_error:
-            print(f"❌ Processing error in step: {str(processing_error)}")
-            import traceback
-            traceback.print_exc()
-
-            doc.status = "error"
-            db.commit()
-            raise HTTPException(status_code=500, detail=f"Processing failed: {str(processing_error)}")
+        return {
+            "message": "Document processed successfully",
+            "chunks_created": len(chunks),
+            "embeddings_stored": len(vector_ids)
+        }
 
     except HTTPException:
-        # Re-raise HTTP exceptions
+        # Re-raise HTTP exceptions as-is
         raise
     except Exception as e:
-        print(f"❌ Unexpected error: {str(e)}")
-        import traceback
-        traceback.print_exc()
+        # Catch any other unexpected errors
+        error_msg = f"Unexpected error: {type(e).__name__}: {str(e)}"
+        print(f"❌ {error_msg}")
 
-        # Update document status to error
+        # Import traceback for detailed error logging
+        import traceback
+        print(f"📍 Full traceback:\n{traceback.format_exc()}")
+
+        # Update document status to error if possible
         try:
             doc = db.query(Document).filter(Document.id == doc_id).first()
             if doc:
@@ -263,8 +318,7 @@ async def process_document(doc_id: int, db: Session = Depends(get_db)):
         except:
             pass
 
-        raise HTTPException(status_code=500, detail=f"Processing failed: {str(e)}")
-
+        raise HTTPException(status_code=500, detail=error_msg)
 
 @app.post("/search")
 async def search_documents(request: dict):
