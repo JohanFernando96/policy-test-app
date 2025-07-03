@@ -10,6 +10,7 @@ import re
 
 logger = logging.getLogger(__name__)
 
+
 class OpenAIService:
     def __init__(self):
         self.client = openai.OpenAI(api_key=settings.openai_api_key)
@@ -78,7 +79,7 @@ class OpenAIService:
         return query
 
     def answer_question(self, question: str, context_chunks: list,
-                       document_context: Optional[Dict[str, Any]] = None) -> dict:
+                        document_context: Optional[Dict[str, Any]] = None) -> dict:
         """Enhanced question answering using context from document chunks"""
         try:
             # Prepare context with hierarchy and metadata
@@ -255,9 +256,9 @@ Answer:"""
 
         intent_prompt = f"""
         Analyze this query and provide a JSON response with the query intent:
-        
+
         Query: "{query}"
-        
+
         Provide a JSON response with:
         {{
             "intent_type": "factual|policy|process|comparison|compliance",
@@ -277,7 +278,8 @@ Answer:"""
             response = self.client.chat.completions.create(
                 model="gpt-4o-mini",
                 messages=[
-                    {"role": "system", "content": "You are a query analysis expert. Analyze user queries to determine search intent and optimal retrieval strategy."},
+                    {"role": "system",
+                     "content": "You are a query analysis expert. Analyze user queries to determine search intent and optimal retrieval strategy."},
                     {"role": "user", "content": intent_prompt}
                 ],
                 temperature=0.1,
@@ -304,6 +306,7 @@ Answer:"""
             "requires_numerical_data": False,
             "suggested_filters": {}
         }
+
 
 # Global instance
 openai_service = OpenAIService()
