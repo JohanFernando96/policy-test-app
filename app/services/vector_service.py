@@ -1,9 +1,9 @@
 """
-Enhanced Qdrant Cloud Vector Database Service with Intelligent Search
+Qdrant Cloud Vector Database Service with Index Management
 """
 from qdrant_client import QdrantClient
-from qdrant_client.models import Distance, VectorParams, PointStruct, Filter, FieldCondition, MatchValue
-from typing import List, Dict, Any, Optional
+from qdrant_client.models import Distance, VectorParams, PointStruct, PayloadSchemaType
+from typing import List, Dict, Any
 import uuid
 import numpy as np
 from app.config import settings
@@ -46,26 +46,80 @@ class QdrantVectorService:
                 )
                 logger.info(f"✅ Created collection: {self.collection_name}")
                 print(f"✅ Created collection: {self.collection_name}")
+
+                # Create necessary indexes after collection creation
+                self._create_indexes()
             else:
                 # Check existing collection dimensions
                 collection_info = self.client.get_collection(self.collection_name)
                 existing_size = collection_info.config.params.vectors.size
 
                 if existing_size != self.vector_size:
-                    print(f"⚠️ Collection exists with {existing_size} dimensions, but config expects {self.vector_size}")
+                    print(
+                        f"⚠️ Collection exists with {existing_size} dimensions, but config expects {self.vector_size}")
                     print(f"💡 Using existing collection dimensions: {existing_size}")
                     self.vector_size = existing_size
 
                 logger.info(f"✅ Collection {self.collection_name} already exists")
                 print(f"✅ Collection {self.collection_name} already exists ({self.vector_size} dimensions)")
 
+                # Ensure indexes exist
+                self._ensure_indexes_exist()
+
         except Exception as e:
             logger.error(f"❌ Error connecting to Qdrant: {e}")
             print(f"❌ Error connecting to Qdrant: {e}")
             raise
 
+    def _create_indexes(self):
+        """Create necessary indexes for efficient filtering"""
+        try:
+            # Create index for document_id field (used for filtering and deletion)
+            self.client.create_payload_index(
+                collection_name=self.collection_name,
+                field_name="document_id",
+                field_schema=PayloadSchemaType.KEYWORD
+            )
+            print("✅ Created index for document_id field")
+
+            # Create index for filename field (used for searching by filename)
+            self.client.create_payload_index(
+                collection_name=self.collection_name,
+                field_name="filename",
+                field_schema=PayloadSchemaType.KEYWORD
+            )
+            print("✅ Created index for filename field")
+
+            # Create index for chunk_index field (used for ordering)
+            self.client.create_payload_index(
+                collection_name=self.collection_name,
+                field_name="chunk_index",
+                field_schema=PayloadSchemaType.INTEGER
+            )
+            print("✅ Created index for chunk_index field")
+
+        except Exception as e:
+            print(f"⚠️ Warning: Could not create some indexes: {e}")
+            logger.warning(f"Index creation warning: {e}")
+
+    def _ensure_indexes_exist(self):
+        """Ensure indexes exist for existing collections"""
+        try:
+            # Get collection info to check existing indexes
+            collection_info = self.client.get_collection(self.collection_name)
+
+            # Try to create indexes (will be ignored if they already exist)
+            self._create_indexes()
+
+        except Exception as e:
+            print(f"⚠️ Warning: Could not verify/create indexes: {e}")
+
     def add_embeddings(self, embeddings: List[List[float]], metadata_list: List[Dict[str, Any]]) -> List[str]:
-        """Add embeddings with enhanced metadata to Qdrant"""
+        """Add embeddings with metadata to Qdrant"""
+        if not embeddings or not metadata_list:
+            print("⚠️ Warning: No embeddings or metadata provided")
+            return []
+
         points = []
         point_ids = []
 
@@ -73,18 +127,14 @@ class QdrantVectorService:
             point_id = str(uuid.uuid4())
             point_ids.append(point_id)
 
-            # Enhance metadata with additional indexable fields
-            enhanced_metadata = {
-                **metadata,
-                "vector_id": point_id,
-                "searchable_content": self._create_searchable_content(metadata),
-                "chunk_keywords": self._extract_keywords(metadata.get("content", "")),
-            }
+            # Ensure document_id is a string for consistent indexing
+            if 'document_id' in metadata:
+                metadata['document_id'] = str(metadata['document_id'])
 
             point = PointStruct(
                 id=point_id,
                 vector=embedding,
-                payload=enhanced_metadata
+                payload=metadata
             )
             points.append(point)
 
@@ -98,91 +148,24 @@ class QdrantVectorService:
         print(f"✅ Added {len(points)} embeddings to Qdrant Cloud")
         return point_ids
 
-    def _create_searchable_content(self, metadata: Dict[str, Any]) -> str:
-        """Create enhanced searchable content from metadata"""
-        searchable_parts = []
-
-        # Add hierarchy context
-        if metadata.get("section_hierarchy"):
-            hierarchy_text = " > ".join(metadata["section_hierarchy"])
-            searchable_parts.append(f"Section: {hierarchy_text}")
-
-        # Add document type and chunk type
-        if metadata.get("document_type"):
-            searchable_parts.append(f"Document Type: {metadata['document_type']}")
-
-        if metadata.get("chunk_type"):
-            searchable_parts.append(f"Content Type: {metadata['chunk_type']}")
-
-        # Add semantic summary if available
-        if metadata.get("semantic_summary"):
-            searchable_parts.append(f"Summary: {metadata['semantic_summary']}")
-
-        # Add main content
-        if metadata.get("content"):
-            searchable_parts.append(metadata["content"])
-
-        return " | ".join(searchable_parts)
-
-    def _extract_keywords(self, content: str) -> List[str]:
-        """Extract keywords from content for better filtering"""
-        import re
-
-        # Simple keyword extraction - could be enhanced with NLP
-        words = re.findall(r'\b[A-Z][a-z]+\b|\b[a-z]{4,}\b', content)
-
-        # Common policy/legal terms
-        policy_terms = ["policy", "procedure", "agreement", "contract", "clause",
-                        "section", "payment", "invoice", "vendor", "employee",
-                        "compliance", "audit", "approval", "authorization"]
-
-        keywords = []
-        for word in words:
-            if word.lower() in policy_terms or len(word) >= 5:
-                keywords.append(word.lower())
-
-        return list(set(keywords))[:10]  # Limit to 10 unique keywords
-
-    def search_similar(self, query_embedding: List[float], limit: int = 10,
-                       filters: Optional[Dict[str, Any]] = None) -> List[Dict[str, Any]]:
-        """Enhanced search for similar embeddings in Qdrant with filtering"""
+    def search_similar(self, query_embedding: List[float], limit: int = 10, filters: Dict[str, Any] = None) -> List[Dict[str, Any]]:
+        """Search for similar embeddings in Qdrant with improved threshold"""
         try:
             search_params = {
                 "collection_name": self.collection_name,
                 "query_vector": query_embedding,
                 "limit": limit,
-                "score_threshold": 0.7  # Similarity threshold
+                "score_threshold": 0.3  # Lowered from 0.7 to 0.3 for better results
             }
 
             # Add filters if provided
             if filters:
+                from qdrant_client.models import Filter, FieldCondition, MatchValue
                 filter_conditions = []
 
-                # Document type filter
-                if filters.get("document_type"):
+                for key, value in filters.items():
                     filter_conditions.append(
-                        FieldCondition(
-                            key="document_type",
-                            match=MatchValue(value=filters["document_type"])
-                        )
-                    )
-
-                # Chunk type filter
-                if filters.get("chunk_type"):
-                    filter_conditions.append(
-                        FieldCondition(
-                            key="chunk_type",
-                            match=MatchValue(value=filters["chunk_type"])
-                        )
-                    )
-
-                # Document ID filter
-                if filters.get("document_id"):
-                    filter_conditions.append(
-                        FieldCondition(
-                            key="document_id",
-                            match=MatchValue(value=filters["document_id"])
-                        )
+                        FieldCondition(key=key, match=MatchValue(value=str(value)))
                     )
 
                 if filter_conditions:
@@ -199,185 +182,94 @@ class QdrantVectorService:
                 }
                 results.append(result)
 
-            logger.info(f"✅ Found {len(results)} similar vectors")
+            logger.info(f"✅ Found {len(results)} similar vectors with threshold 0.3")
+            print(f"🔍 Search found {len(results)} results with similarity > 0.3")
             return results
 
         except Exception as e:
             logger.error(f"❌ Error searching vectors: {e}")
+            print(f"❌ Error searching vectors: {e}")
             return []
 
-    def search_with_context_expansion(self, query_embedding: List[float], limit: int = 5,
-                                      expand_window: int = 2) -> List[Dict[str, Any]]:
-        """Search with context expansion - returns chunks with their surrounding context"""
+    def search_with_debug(self, query_embedding: List[float], limit: int = 10) -> Dict[str, Any]:
+        """Search with debug information to help troubleshoot"""
         try:
-            # First, get the top results
-            initial_results = self.search_similar(query_embedding, limit)
-
-            expanded_results = []
-
-            for result in initial_results:
-                chunk_index = result["metadata"].get("chunk_index", 0)
-                document_id = result["metadata"].get("document_id")
-
-                # Get surrounding chunks
-                context_chunks = self._get_surrounding_chunks(
-                    document_id, chunk_index, expand_window
-                )
-
-                # Combine context
-                expanded_result = {
-                    **result,
-                    "context_chunks": context_chunks,
-                    "expanded_content": self._combine_chunk_context(
-                        result["metadata"], context_chunks
-                    )
-                }
-                expanded_results.append(expanded_result)
-
-            return expanded_results
-
-        except Exception as e:
-            logger.error(f"❌ Error in context expansion search: {e}")
-            return self.search_similar(query_embedding, limit)
-
-    def _get_surrounding_chunks(self, document_id: int, chunk_index: int,
-                                window: int) -> List[Dict[str, Any]]:
-        """Get chunks surrounding a specific chunk"""
-        try:
-            # Search for chunks in the same document with nearby indices
-            filter_conditions = [
-                FieldCondition(
-                    key="document_id",
-                    match=MatchValue(value=document_id)
-                )
-            ]
-
-            # Get all chunks from the document
-            search_result = self.client.scroll(
+            # First, try without any threshold to see what's available
+            search_result_no_threshold = self.client.search(
                 collection_name=self.collection_name,
-                scroll_filter=Filter(must=filter_conditions),
-                limit=1000  # Reasonable limit for document chunks
+                query_vector=query_embedding,
+                limit=limit
             )
 
-            # Filter chunks within window
-            context_chunks = []
-            for point in search_result[0]:  # search_result is (points, next_page_offset)
-                point_chunk_index = point.payload.get("chunk_index", 0)
+            # Then try with low threshold
+            search_result_with_threshold = self.client.search(
+                collection_name=self.collection_name,
+                query_vector=query_embedding,
+                limit=limit,
+                score_threshold=0.3
+            )
 
-                if (chunk_index - window <= point_chunk_index <= chunk_index + window and
-                        point_chunk_index != chunk_index):
-                    context_chunks.append({
-                        "chunk_index": point_chunk_index,
-                        "content": point.payload.get("content", ""),
-                        "chunk_type": point.payload.get("chunk_type", ""),
-                        "section_hierarchy": point.payload.get("section_hierarchy", [])
-                    })
+            debug_info = {
+                "total_points_in_collection": self.get_collection_info().get("points_count", 0),
+                "results_without_threshold": len(search_result_no_threshold),
+                "results_with_threshold_0_3": len(search_result_with_threshold),
+                "top_scores_available": [hit.score for hit in search_result_no_threshold[:5]],
+                "results": []
+            }
 
-            # Sort by chunk index
-            context_chunks.sort(key=lambda x: x["chunk_index"])
-            return context_chunks
+            # Return the thresholded results
+            for hit in search_result_with_threshold:
+                result = {
+                    "id": hit.id,
+                    "similarity": hit.score,
+                    "metadata": hit.payload
+                }
+                debug_info["results"].append(result)
 
-        except Exception as e:
-            logger.error(f"❌ Error getting surrounding chunks: {e}")
-            return []
-
-    def _combine_chunk_context(self, main_chunk: Dict[str, Any],
-                               context_chunks: List[Dict[str, Any]]) -> str:
-        """Combine main chunk with context chunks"""
-        combined_parts = []
-
-        main_index = main_chunk.get("chunk_index", 0)
-
-        # Add before context
-        before_chunks = [c for c in context_chunks if c["chunk_index"] < main_index]
-        if before_chunks:
-            combined_parts.append("=== CONTEXT BEFORE ===")
-            for chunk in before_chunks:
-                combined_parts.append(chunk["content"][:200] + "...")
-
-        # Add main chunk
-        combined_parts.append("=== MAIN CONTENT ===")
-        combined_parts.append(main_chunk.get("content", ""))
-
-        # Add after context
-        after_chunks = [c for c in context_chunks if c["chunk_index"] > main_index]
-        if after_chunks:
-            combined_parts.append("=== CONTEXT AFTER ===")
-            for chunk in after_chunks:
-                combined_parts.append(chunk["content"][:200] + "...")
-
-        return "\n\n".join(combined_parts)
-
-    def search_by_section_hierarchy(self, hierarchy_path: List[str],
-                                    similarity_threshold: float = 0.5) -> List[Dict[str, Any]]:
-        """Search for chunks within a specific section hierarchy"""
-        try:
-            # Use scroll to get all documents and filter by hierarchy
-            all_results = []
-            offset = None
-
-            while True:
-                scroll_result = self.client.scroll(
-                    collection_name=self.collection_name,
-                    limit=100,
-                    offset=offset
-                )
-
-                points, next_offset = scroll_result
-
-                for point in points:
-                    chunk_hierarchy = point.payload.get("section_hierarchy", [])
-
-                    # Check if chunk hierarchy matches or contains the search path
-                    if self._hierarchy_matches(hierarchy_path, chunk_hierarchy):
-                        all_results.append({
-                            "id": point.id,
-                            "similarity": 1.0,  # Exact match
-                            "metadata": point.payload
-                        })
-
-                if next_offset is None:
-                    break
-                offset = next_offset
-
-            logger.info(f"✅ Found {len(all_results)} chunks in hierarchy: {' > '.join(hierarchy_path)}")
-            return all_results
+            return debug_info
 
         except Exception as e:
-            logger.error(f"❌ Error searching by hierarchy: {e}")
-            return []
-
-    def _hierarchy_matches(self, search_path: List[str], chunk_hierarchy: List[str]) -> bool:
-        """Check if chunk hierarchy matches search path"""
-        if len(search_path) > len(chunk_hierarchy):
-            return False
-
-        for i, search_item in enumerate(search_path):
-            if i >= len(chunk_hierarchy) or search_item.lower() not in chunk_hierarchy[i].lower():
-                return False
-
-        return True
+            return {
+                "error": str(e),
+                "total_points_in_collection": 0,
+                "results_without_threshold": 0,
+                "results_with_threshold_0_3": 0,
+                "results": []
+            }
 
     def delete_by_document_id(self, document_id: str):
-        """Delete all embeddings for a specific document"""
+        """Delete all embeddings for a specific document using indexed field"""
         try:
-            self.client.delete(
-                collection_name=self.collection_name,
-                points_selector=Filter(
-                    must=[
-                        FieldCondition(
-                            key="document_id",
-                            match=MatchValue(value=document_id)
-                        )
-                    ]
-                )
+            from qdrant_client.models import Filter, FieldCondition, MatchValue
+
+            # Convert document_id to string for consistency
+            document_id_str = str(document_id)
+
+            # Use the indexed document_id field for efficient deletion
+            filter_condition = Filter(
+                must=[
+                    FieldCondition(
+                        key="document_id",
+                        match=MatchValue(value=document_id_str)
+                    )
+                ]
             )
+
+            # Delete points matching the filter
+            operation_result = self.client.delete(
+                collection_name=self.collection_name,
+                points_selector=filter_condition
+            )
+
             logger.info(f"✅ Deleted embeddings for document {document_id}")
             print(f"✅ Deleted embeddings for document {document_id}")
+
+            return operation_result
 
         except Exception as e:
             logger.error(f"❌ Error deleting embeddings: {e}")
             print(f"❌ Error deleting embeddings: {e}")
+            return None
 
     def get_collection_info(self):
         """Get information about the collection"""
@@ -393,63 +285,41 @@ class QdrantVectorService:
             logger.error(f"❌ Error getting collection info: {e}")
             return None
 
-    def get_document_statistics(self, document_id: int) -> Dict[str, Any]:
+    def get_document_statistics(self, document_id: int):
         """Get statistics for a specific document"""
         try:
-            # Get all chunks for the document
-            filter_conditions = [
-                FieldCondition(
-                    key="document_id",
-                    match=MatchValue(value=document_id)
-                )
-            ]
+            from qdrant_client.models import Filter, FieldCondition, MatchValue
 
-            search_result = self.client.scroll(
-                collection_name=self.collection_name,
-                scroll_filter=Filter(must=filter_conditions),
-                limit=1000
+            # Count points for this document
+            filter_condition = Filter(
+                must=[
+                    FieldCondition(
+                        key="document_id",
+                        match=MatchValue(value=str(document_id))
+                    )
+                ]
             )
 
-            chunks = search_result[0]
+            # Use scroll to count points (more efficient than search for counting)
+            scroll_result = self.client.scroll(
+                collection_name=self.collection_name,
+                scroll_filter=filter_condition,
+                limit=1000,  # Max limit to count
+                with_vectors=False,  # Don't return vectors, just count
+                with_payload=False   # Don't return payload, just count
+            )
 
-            if not chunks:
-                return {"error": "Document not found"}
-
-            # Analyze chunks
-            chunk_types = {}
-            section_count = 0
-            total_chars = 0
-            hierarchies = set()
-
-            for chunk in chunks:
-                payload = chunk.payload
-
-                # Count chunk types
-                chunk_type = payload.get("chunk_type", "unknown")
-                chunk_types[chunk_type] = chunk_types.get(chunk_type, 0) + 1
-
-                # Count characters
-                total_chars += payload.get("character_count", 0)
-
-                # Collect hierarchies
-                if payload.get("section_hierarchy"):
-                    hierarchy_path = " > ".join(payload["section_hierarchy"])
-                    hierarchies.add(hierarchy_path)
+            point_count = len(scroll_result[0])  # First element contains points
 
             return {
                 "document_id": document_id,
-                "total_chunks": len(chunks),
-                "chunk_types": chunk_types,
-                "total_characters": total_chars,
-                "unique_sections": len(hierarchies),
-                "section_hierarchies": list(hierarchies),
-                "document_type": chunks[0].payload.get("document_type", "unknown"),
-                "chunking_strategy": chunks[0].payload.get("chunking_strategy", "unknown")
+                "embeddings_count": point_count,
+                "collection_name": self.collection_name
             }
 
         except Exception as e:
             logger.error(f"❌ Error getting document statistics: {e}")
-            return {"error": str(e)}
+            return {"document_id": document_id, "embeddings_count": 0, "error": str(e)}
 
 # Global instance
 vector_service = QdrantVectorService()

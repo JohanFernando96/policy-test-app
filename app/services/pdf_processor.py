@@ -5,10 +5,12 @@ from app.config import settings
 import logging
 import re
 import json
-from dataclasses import dataclass
+from dataclasses import dataclass, asdict
 import tiktoken
+import time
 
 logger = logging.getLogger(__name__)
+
 
 @dataclass
 class ChunkMetadata:
@@ -21,9 +23,14 @@ class ChunkMetadata:
     content: str
     character_count: int
     token_count: int
-    semantic_summary: str
-    context_window: str  # surrounding context for better retrieval
-    relationships: List[str]  # references to related chunks
+    semantic_summary: str = ""
+    context_window: str = ""  # surrounding context for better retrieval
+    relationships: List[str] = None  # references to related chunks
+
+    def __post_init__(self):
+        if self.relationships is None:
+            self.relationships = []
+
 
 @dataclass
 class DocumentStructure:
@@ -32,6 +39,7 @@ class DocumentStructure:
     sections: List[Dict[str, Any]]
     has_hierarchical_structure: bool
     suggested_chunking_strategy: str
+
 
 class PDFProcessor:
     def __init__(self):
@@ -45,18 +53,23 @@ class PDFProcessor:
     def analyze_document_structure(self, text: str, filename: str) -> DocumentStructure:
         """Use LLM to analyze document structure and determine optimal chunking strategy"""
 
+        # Skip LLM analysis if text is too short or if we want to use fallback
+        if len(text.strip()) < 500:
+            print("📋 Text too short for LLM analysis, using fallback structure analysis")
+            return self._fallback_structure_analysis(text)
+
         # Take first 2000 characters for analysis to stay within token limits
         sample_text = text[:2000] + "..." if len(text) > 2000 else text
 
         analysis_prompt = f"""
         Analyze this document and provide a JSON response with the following structure:
-        
+
         Document filename: {filename}
         Document sample:
         ---
         {sample_text}
         ---
-        
+
         Provide a JSON response with:
         {{
             "document_type": "policy|agreement|manual|procedure|report|other",
@@ -79,15 +92,16 @@ class PDFProcessor:
                 "policy_structure": true/false
             }}
         }}
-        
+
         Focus on identifying the document's organizational structure to determine the best chunking approach.
         """
 
         try:
             response = self.openai_client.chat.completions.create(
-                model="gpt-4o-mini",
+                model=settings.llm_analysis_model,
                 messages=[
-                    {"role": "system", "content": "You are a document structure analysis expert. Analyze documents to determine optimal chunking strategies for policy and legal document retrieval systems."},
+                    {"role": "system",
+                     "content": "You are a document structure analysis expert. Analyze documents to determine optimal chunking strategies for policy and legal document retrieval systems."},
                     {"role": "user", "content": analysis_prompt}
                 ],
                 temperature=0.1,
@@ -112,6 +126,7 @@ class PDFProcessor:
 
         except Exception as e:
             logger.error(f"Error in document structure analysis: {e}")
+            print(f"📋 LLM analysis failed: {e}, using fallback")
             return self._fallback_structure_analysis(text)
 
     def _fallback_structure_analysis(self, text: str) -> DocumentStructure:
@@ -141,11 +156,16 @@ class PDFProcessor:
                         "content_type": "policy"
                     })
 
+        document_type = "policy" if "policy" in text.lower()[:500] else "document"
+        chunking_strategy = "hierarchical" if len(sections) > 2 else "semantic"
+
+        print(f"📋 Fallback analysis: {document_type}, {len(sections)} sections, strategy: {chunking_strategy}")
+
         return DocumentStructure(
-            document_type="policy" if "policy" in text.lower()[:500] else "document",
+            document_type=document_type,
             sections=sections,
             has_hierarchical_structure=len(sections) > 0,
-            suggested_chunking_strategy="hierarchical" if len(sections) > 0 else "semantic"
+            suggested_chunking_strategy=chunking_strategy
         )
 
     def extract_text_from_pdf(self, file_path: str) -> str:
@@ -170,88 +190,203 @@ class PDFProcessor:
         """Implement hierarchical chunking based on document structure"""
         chunks = []
 
-        if not structure.has_hierarchical_structure:
+        if not structure.has_hierarchical_structure or len(structure.sections) == 0:
+            print("📋 No clear hierarchical structure found, falling back to semantic chunking")
             return self.semantic_chunking(text, structure)
 
-        # Split by sections first
-        section_pattern = r'^([IVX]+\.|[\d\.]+\s+|[A-Z][A-Z\s]{2,}[A-Z])'
-        sections = re.split(section_pattern, text, flags=re.MULTILINE)
+        try:
+            # Split by sections first
+            section_patterns = [
+                r'^([IVX]+\.[^\n]+)',  # Roman numerals
+                r'^([\d\.]+\s+[A-Z][^\n]+)',  # Numbered sections
+                r'^([A-Z][A-Z\s]{3,}[A-Z])\s*$'  # ALL CAPS headers
+            ]
 
-        current_hierarchy = []
-        chunk_index = 0
+            # Try each pattern
+            for pattern in section_patterns:
+                sections = re.split(f'({pattern})', text, flags=re.MULTILINE)
+                if len(sections) > 3:  # Found meaningful sections
+                    break
+            else:
+                # No clear sections found, fall back
+                print("📋 No clear section patterns found, using semantic chunking")
+                return self.semantic_chunking(text, structure)
 
-        for i in range(1, len(sections), 2):  # Skip empty splits
-            if i + 1 < len(sections):
-                section_header = sections[i].strip()
-                section_content = sections[i + 1].strip()
+            current_hierarchy = []
+            chunk_index = 0
 
-                # Determine hierarchy level
-                level = self._determine_hierarchy_level(section_header)
-                current_hierarchy = self._update_hierarchy(current_hierarchy, section_header, level)
+            # Process sections
+            for i in range(1, len(sections), 2):  # Skip empty splits
+                if i + 1 < len(sections):
+                    section_header = sections[i].strip()
+                    section_content = sections[i + 1].strip()
 
-                # Further chunk large sections
-                if len(section_content) > 2000:  # If section is large, chunk it further
-                    sub_chunks = self._chunk_large_section(
-                        section_content,
-                        current_hierarchy,
-                        chunk_index,
-                        structure
-                    )
-                    chunks.extend(sub_chunks)
-                    chunk_index += len(sub_chunks)
-                else:
-                    # Create single chunk for section
-                    chunk = self._create_chunk_metadata(
-                        content=section_content,
-                        chunk_index=chunk_index,
-                        chunk_type="section",
-                        hierarchy=current_hierarchy.copy(),
-                        structure=structure
-                    )
-                    chunks.append(chunk)
-                    chunk_index += 1
+                    if not section_content:  # Skip empty sections
+                        continue
 
-        return chunks
+                    # Determine hierarchy level
+                    level = self._determine_hierarchy_level(section_header)
+                    current_hierarchy = self._update_hierarchy(current_hierarchy, section_header, level)
+
+                    # Further chunk large sections
+                    if len(section_content) > 2000:  # If section is large, chunk it further
+                        sub_chunks = self._chunk_large_section(
+                            section_content,
+                            current_hierarchy,
+                            chunk_index,
+                            structure
+                        )
+                        chunks.extend(sub_chunks)
+                        chunk_index += len(sub_chunks)
+                    else:
+                        # Create single chunk for section
+                        chunk = self._create_chunk_metadata(
+                            content=section_content,
+                            chunk_index=chunk_index,
+                            chunk_type="section",
+                            hierarchy=current_hierarchy.copy(),
+                            structure=structure
+                        )
+                        chunks.append(chunk)
+                        chunk_index += 1
+
+            # If no chunks were created, fall back to semantic chunking
+            if not chunks:
+                print("📋 Hierarchical chunking produced no chunks, falling back to semantic chunking")
+                return self.semantic_chunking(text, structure)
+
+            print(f"📋 Hierarchical chunking created {len(chunks)} chunks")
+            return chunks
+
+        except Exception as e:
+            logger.error(f"Error in hierarchical chunking: {e}")
+            print(f"📋 Hierarchical chunking failed: {e}, falling back to semantic chunking")
+            return self.semantic_chunking(text, structure)
 
     def semantic_chunking(self, text: str, structure: DocumentStructure) -> List[ChunkMetadata]:
-        """Implement semantic chunking using LLM assistance"""
+        """Implement semantic chunking using LLM assistance with fallback"""
 
-        # First, split into manageable blocks
-        max_block_size = 8000  # characters
-        blocks = self._split_into_blocks(text, max_block_size)
+        try:
+            # First, try simple chunking if text is not too long
+            if len(text) < 3000:
+                return self._simple_semantic_chunking(text, structure)
 
-        all_chunks = []
-        overlap_chunks = []  # Chunks from previous block to maintain context
+            # For longer texts, split into manageable blocks
+            max_block_size = 8000  # characters
+            blocks = self._split_into_blocks(text, max_block_size)
 
-        for block_idx, block in enumerate(blocks):
-            # Combine with overlap from previous block
-            if overlap_chunks:
-                combined_block = "\n\n".join([chunk.content for chunk in overlap_chunks]) + "\n\n" + block
-            else:
-                combined_block = block
+            all_chunks = []
+            overlap_chunks = []  # Chunks from previous block to maintain context
 
-            # Use LLM to chunk this block semantically
-            block_chunks = self._llm_semantic_chunking(combined_block, structure, len(all_chunks))
+            for block_idx, block in enumerate(blocks):
+                # Combine with overlap from previous block
+                if overlap_chunks:
+                    combined_block = "\n\n".join([chunk.content for chunk in overlap_chunks]) + "\n\n" + block
+                else:
+                    combined_block = block
 
-            # Handle overlap for next iteration
-            if block_idx < len(blocks) - 1:  # Not the last block
-                # Keep last 1-2 chunks for overlap
-                overlap_chunks = block_chunks[-2:] if len(block_chunks) > 2 else block_chunks[-1:]
-                valid_chunks = block_chunks[:-2] if len(block_chunks) > 2 else []
-            else:
-                valid_chunks = block_chunks
-                overlap_chunks = []
+                # Use LLM to chunk this block semantically
+                try:
+                    block_chunks = self._llm_semantic_chunking(combined_block, structure, len(all_chunks))
+                except Exception as e:
+                    print(f"📋 LLM chunking failed for block {block_idx}: {e}, using fallback")
+                    block_chunks = self._fallback_chunking(combined_block, len(all_chunks))
 
-            all_chunks.extend(valid_chunks)
+                # Handle overlap for next iteration
+                if block_idx < len(blocks) - 1:  # Not the last block
+                    # Keep last 1-2 chunks for overlap
+                    overlap_chunks = block_chunks[-2:] if len(block_chunks) > 2 else block_chunks[-1:]
+                    valid_chunks = block_chunks[:-2] if len(block_chunks) > 2 else []
+                else:
+                    valid_chunks = block_chunks
+                    overlap_chunks = []
 
-        return all_chunks
+                all_chunks.extend(valid_chunks)
+
+            # If no chunks were created, use fallback
+            if not all_chunks:
+                print("📋 Semantic chunking produced no chunks, using fallback chunking")
+                return self._fallback_chunking(text, 0)
+
+            print(f"📋 Semantic chunking created {len(all_chunks)} chunks")
+            return all_chunks
+
+        except Exception as e:
+            logger.error(f"Error in semantic chunking: {e}")
+            print(f"📋 Semantic chunking failed: {e}, using fallback chunking")
+            return self._fallback_chunking(text, 0)
+
+    def _simple_semantic_chunking(self, text: str, structure: DocumentStructure) -> List[ChunkMetadata]:
+        """Simple semantic chunking for shorter texts"""
+        try:
+            # Split by paragraphs first
+            paragraphs = [p.strip() for p in text.split('\n\n') if p.strip()]
+
+            if not paragraphs:
+                # Split by sentences if no paragraphs
+                sentences = [s.strip() + '.' for s in text.split('.') if s.strip()]
+                paragraphs = sentences
+
+            chunks = []
+            current_chunk = ""
+            chunk_index = 0
+            max_chunk_size = 1200
+
+            for paragraph in paragraphs:
+                test_chunk = current_chunk + "\n\n" + paragraph if current_chunk else paragraph
+
+                if len(test_chunk) > max_chunk_size and current_chunk:
+                    # Save current chunk
+                    chunk = ChunkMetadata(
+                        document_id=0,
+                        filename="",
+                        chunk_index=chunk_index,
+                        chunk_type="paragraph",
+                        section_hierarchy=[],
+                        content=current_chunk.strip(),
+                        character_count=len(current_chunk.strip()),
+                        token_count=len(self.encoding.encode(current_chunk.strip())),
+                        semantic_summary="",
+                        context_window="",
+                        relationships=[]
+                    )
+                    chunks.append(chunk)
+
+                    # Start new chunk
+                    current_chunk = paragraph
+                    chunk_index += 1
+                else:
+                    current_chunk = test_chunk
+
+            # Add final chunk
+            if current_chunk.strip():
+                chunk = ChunkMetadata(
+                    document_id=0,
+                    filename="",
+                    chunk_index=chunk_index,
+                    chunk_type="paragraph",
+                    section_hierarchy=[],
+                    content=current_chunk.strip(),
+                    character_count=len(current_chunk.strip()),
+                    token_count=len(self.encoding.encode(current_chunk.strip())),
+                    semantic_summary="",
+                    context_window="",
+                    relationships=[]
+                )
+                chunks.append(chunk)
+
+            return chunks
+
+        except Exception as e:
+            logger.error(f"Error in simple semantic chunking: {e}")
+            return self._fallback_chunking(text, 0)
 
     def _llm_semantic_chunking(self, text: str, structure: DocumentStructure, start_index: int) -> List[ChunkMetadata]:
         """Use LLM to perform semantic chunking on a text block"""
 
         chunk_prompt = f"""
         You are a document chunking expert. Split the following {structure.document_type} text into semantic chunks.
-        
+
         Guidelines:
         1. Each chunk should contain a complete thought or concept
         2. Aim for chunks of 800-1200 characters
@@ -259,12 +394,12 @@ class PDFProcessor:
         4. Don't break sentences or paragraphs unnaturally
         5. For policy documents, keep related rules together
         6. For agreements, keep related clauses together
-        
-        Text to chunk:
+
+        Text to chunk (length: {len(text)} characters):
         ---
-        {text}
+        {text[:2000]}{"..." if len(text) > 2000 else ""}
         ---
-        
+
         Return a JSON array where each element has:
         {{
             "content": "the chunk text",
@@ -272,15 +407,16 @@ class PDFProcessor:
             "chunk_type": "policy|procedure|clause|definition|general",
             "keywords": ["key", "terms", "in", "chunk"]
         }}
-        
+
         Ensure chunks maintain semantic coherence and context.
         """
 
         try:
             response = self.openai_client.chat.completions.create(
-                model="gpt-4o-mini",
+                model=settings.llm_analysis_model,
                 messages=[
-                    {"role": "system", "content": "You are an expert at semantically chunking policy and legal documents for retrieval systems."},
+                    {"role": "system",
+                     "content": "You are an expert at semantically chunking policy and legal documents for retrieval systems."},
                     {"role": "user", "content": chunk_prompt}
                 ],
                 temperature=0.1,
@@ -297,7 +433,7 @@ class PDFProcessor:
                 for idx, chunk_data in enumerate(chunks_data):
                     chunk = ChunkMetadata(
                         document_id=0,  # Will be set later
-                        filename="",    # Will be set later
+                        filename="",  # Will be set later
                         chunk_index=start_index + idx,
                         chunk_type=chunk_data.get("chunk_type", "general"),
                         section_hierarchy=[],
@@ -320,14 +456,51 @@ class PDFProcessor:
             return self._fallback_chunking(text, start_index)
 
     def _fallback_chunking(self, text: str, start_index: int) -> List[ChunkMetadata]:
-        """Fallback chunking method"""
+        """Robust fallback chunking method that always produces chunks"""
         chunks = []
-        paragraphs = text.split('\n\n')
+
+        if not text.strip():
+            return chunks
+
+        # Clean the text
+        text = text.strip()
+
+        # If text is very short, create single chunk
+        if len(text) < 100:
+            chunk = ChunkMetadata(
+                document_id=0,
+                filename="",
+                chunk_index=start_index,
+                chunk_type="short",
+                section_hierarchy=[],
+                content=text,
+                character_count=len(text),
+                token_count=len(self.encoding.encode(text)),
+                semantic_summary="",
+                context_window="",
+                relationships=[]
+            )
+            return [chunk]
+
+        # Try paragraph-based chunking first
+        paragraphs = [p.strip() for p in text.split('\n\n') if p.strip()]
+
+        if not paragraphs:
+            # No paragraphs, try sentence-based
+            sentences = [s.strip() for s in text.split('.') if s.strip()]
+            paragraphs = [s + '.' for s in sentences if s]
+
+        if not paragraphs:
+            # No sentences, use the whole text
+            paragraphs = [text]
+
         current_chunk = ""
         chunk_index = start_index
+        max_chunk_size = 1200
 
         for paragraph in paragraphs:
-            if len(current_chunk) + len(paragraph) > 1000 and current_chunk:
+            if len(current_chunk) + len(paragraph) > max_chunk_size and current_chunk:
+                # Create chunk from current content
                 chunk = ChunkMetadata(
                     document_id=0,
                     filename="",
@@ -335,8 +508,8 @@ class PDFProcessor:
                     chunk_type="paragraph",
                     section_hierarchy=[],
                     content=current_chunk.strip(),
-                    character_count=len(current_chunk),
-                    token_count=len(self.encoding.encode(current_chunk)),
+                    character_count=len(current_chunk.strip()),
+                    token_count=len(self.encoding.encode(current_chunk.strip())),
                     semantic_summary="",
                     context_window="",
                     relationships=[]
@@ -345,7 +518,7 @@ class PDFProcessor:
                 current_chunk = paragraph
                 chunk_index += 1
             else:
-                current_chunk += paragraph + "\n\n"
+                current_chunk += ("\n\n" + paragraph) if current_chunk else paragraph
 
         # Add final chunk
         if current_chunk.strip():
@@ -356,20 +529,38 @@ class PDFProcessor:
                 chunk_type="paragraph",
                 section_hierarchy=[],
                 content=current_chunk.strip(),
-                character_count=len(current_chunk),
-                token_count=len(self.encoding.encode(current_chunk)),
+                character_count=len(current_chunk.strip()),
+                token_count=len(self.encoding.encode(current_chunk.strip())),
                 semantic_summary="",
                 context_window="",
                 relationships=[]
             )
             chunks.append(chunk)
 
+        # Ensure we have at least one chunk
+        if not chunks and text.strip():
+            chunk = ChunkMetadata(
+                document_id=0,
+                filename="",
+                chunk_index=start_index,
+                chunk_type="fallback",
+                section_hierarchy=[],
+                content=text.strip(),
+                character_count=len(text.strip()),
+                token_count=len(self.encoding.encode(text.strip())),
+                semantic_summary="",
+                context_window="",
+                relationships=[]
+            )
+            chunks.append(chunk)
+
+        print(f"📋 Fallback chunking created {len(chunks)} chunks")
         return chunks
 
     def _split_into_blocks(self, text: str, max_size: int) -> List[str]:
         """Split text into blocks for processing"""
         blocks = []
-        paragraphs = text.split('\n\n')
+        paragraphs = [p.strip() for p in text.split('\n\n') if p.strip()]
         current_block = ""
 
         for paragraph in paragraphs:
@@ -377,12 +568,12 @@ class PDFProcessor:
                 blocks.append(current_block.strip())
                 current_block = paragraph
             else:
-                current_block += paragraph + "\n\n"
+                current_block += ("\n\n" + paragraph) if current_block else paragraph
 
         if current_block.strip():
             blocks.append(current_block.strip())
 
-        return blocks
+        return blocks if blocks else [text]  # Ensure at least one block
 
     def _determine_hierarchy_level(self, header: str) -> int:
         """Determine the hierarchy level of a header"""
@@ -404,16 +595,16 @@ class PDFProcessor:
     def _update_hierarchy(self, current: List[str], header: str, level: int) -> List[str]:
         """Update hierarchy breadcrumb"""
         # Truncate hierarchy to current level
-        new_hierarchy = current[:level-1] if len(current) >= level else current
+        new_hierarchy = current[:level - 1] if len(current) >= level else current
         new_hierarchy.append(header)
         return new_hierarchy
 
     def _create_chunk_metadata(self, content: str, chunk_index: int, chunk_type: str,
-                             hierarchy: List[str], structure: DocumentStructure) -> ChunkMetadata:
+                               hierarchy: List[str], structure: DocumentStructure) -> ChunkMetadata:
         """Create enhanced chunk metadata"""
         return ChunkMetadata(
             document_id=0,  # Will be set later
-            filename="",    # Will be set later
+            filename="",  # Will be set later
             chunk_index=chunk_index,
             chunk_type=chunk_type,
             section_hierarchy=hierarchy,
@@ -421,23 +612,16 @@ class PDFProcessor:
             character_count=len(content),
             token_count=len(self.encoding.encode(content)),
             semantic_summary="",  # Could be enhanced with LLM
-            context_window="",    # Will be set during processing
+            context_window="",  # Will be set during processing
             relationships=[]
         )
 
     def _chunk_large_section(self, content: str, hierarchy: List[str],
-                           start_index: int, structure: DocumentStructure) -> List[ChunkMetadata]:
+                             start_index: int, structure: DocumentStructure) -> List[ChunkMetadata]:
         """Chunk large sections into smaller semantic pieces"""
 
-        # Use semantic chunking for large sections
-        temp_structure = DocumentStructure(
-            document_type=structure.document_type,
-            sections=[],
-            has_hierarchical_structure=False,
-            suggested_chunking_strategy="semantic"
-        )
-
-        chunks = self._llm_semantic_chunking(content, temp_structure, start_index)
+        # Use fallback chunking for large sections to ensure reliability
+        chunks = self._fallback_chunking(content, start_index)
 
         # Update hierarchy for all chunks
         for chunk in chunks:
@@ -455,7 +639,7 @@ class PDFProcessor:
 
             # Previous chunk context
             if i > 0:
-                prev_chunk = chunks[i-1]
+                prev_chunk = chunks[i - 1]
                 context_parts.append(f"Previous: {prev_chunk.content[:100]}...")
 
             # Current chunk
@@ -463,7 +647,7 @@ class PDFProcessor:
 
             # Next chunk context
             if i < len(chunks) - 1:
-                next_chunk = chunks[i+1]
+                next_chunk = chunks[i + 1]
                 context_parts.append(f"Next: {next_chunk.content[:100]}...")
 
             chunk.context_window = " | ".join(context_parts)
@@ -479,21 +663,38 @@ class PDFProcessor:
                 if j != i and chunk.section_hierarchy and other_chunk.section_hierarchy:
                     # Same parent section
                     if (len(chunk.section_hierarchy) > 1 and
-                        len(other_chunk.section_hierarchy) > 1 and
-                        chunk.section_hierarchy[:-1] == other_chunk.section_hierarchy[:-1]):
+                            len(other_chunk.section_hierarchy) > 1 and
+                            chunk.section_hierarchy[:-1] == other_chunk.section_hierarchy[:-1]):
                         chunk.relationships.append(f"chunk_{j}")
 
         return chunks
 
     def chunk_text(self, text: str, chunk_size: int = 1000, overlap: int = 200) -> List[Dict[str, Any]]:
-        """Legacy chunk_text method for backward compatibility"""
+        """Legacy chunk_text method for backward compatibility - ALWAYS returns chunks"""
         try:
+            if not text or not text.strip():
+                print("⚠️ Warning: Empty text provided to chunk_text")
+                return []
+
+            text = text.strip()
+
             # Use fallback chunking for backward compatibility
             chunks = []
-            paragraphs = text.split('\n\n')
+
+            # Try paragraph-based chunking first
+            paragraphs = [p.strip() for p in text.split('\n\n') if p.strip()]
+
+            if not paragraphs:
+                # No paragraphs, try sentences
+                sentences = [s.strip() for s in text.split('.') if s.strip()]
+                paragraphs = [s + '.' for s in sentences if s]
+
+            if not paragraphs:
+                # No sentences, use whole text
+                paragraphs = [text]
+
             current_chunk = ""
             chunk_index = 0
-
             max_tokens_per_chunk = 1000
 
             for paragraph in paragraphs:
@@ -504,24 +705,39 @@ class PDFProcessor:
                     chunks.append({
                         "index": chunk_index,
                         "content": current_chunk.strip(),
-                        "character_count": len(current_chunk),
-                        "token_count": len(self.encoding.encode(current_chunk))
+                        "character_count": len(current_chunk.strip()),
+                        "token_count": len(self.encoding.encode(current_chunk.strip()))
                     })
 
+                    # Add overlap
                     overlap_tokens = self.encoding.encode(current_chunk)[-overlap:] if len(
                         self.encoding.encode(current_chunk)) > overlap else self.encoding.encode(current_chunk)
-                    overlap_text = self.encoding.decode(overlap_tokens)
-                    current_chunk = overlap_text + "\n\n" + paragraph
+                    try:
+                        overlap_text = self.encoding.decode(overlap_tokens)
+                        current_chunk = overlap_text + "\n\n" + paragraph
+                    except:
+                        current_chunk = paragraph
+
                     chunk_index += 1
                 else:
                     current_chunk = test_chunk
 
+            # Add final chunk
             if current_chunk.strip():
                 chunks.append({
                     "index": chunk_index,
                     "content": current_chunk.strip(),
-                    "character_count": len(current_chunk),
-                    "token_count": len(self.encoding.encode(current_chunk))
+                    "character_count": len(current_chunk.strip()),
+                    "token_count": len(self.encoding.encode(current_chunk.strip()))
+                })
+
+            # Ensure we have at least one chunk if we have text
+            if not chunks and text.strip():
+                chunks.append({
+                    "index": 0,
+                    "content": text.strip(),
+                    "character_count": len(text.strip()),
+                    "token_count": len(self.encoding.encode(text.strip()))
                 })
 
             logger.info(f"Created {len(chunks)} token-aware chunks")
@@ -529,45 +745,71 @@ class PDFProcessor:
             return chunks
 
         except Exception as e:
-            logger.warning(f"Token-aware chunking failed, using character-based: {e}")
-            return self._chunk_text_character_based(text, chunk_size, overlap)
+            logger.warning(f"Token-aware chunking failed, using simple fallback: {e}")
+            print(f"⚠️ Chunking error: {e}, using simple fallback")
+            return self._simple_fallback_chunks(text, chunk_size, overlap)
 
-    def _chunk_text_character_based(self, text: str, chunk_size: int = 1000, overlap: int = 200) -> List[Dict[str, Any]]:
-        """Fallback character-based chunking"""
+    def _simple_fallback_chunks(self, text: str, chunk_size: int = 1000, overlap: int = 200) -> List[Dict[str, Any]]:
+        """Ultra-simple fallback chunking that always works"""
+        if not text or not text.strip():
+            return []
+
+        text = text.strip()
         chunks = []
-        paragraphs = text.split('\n\n')
-        current_chunk = ""
+
+        # If text is shorter than chunk size, return single chunk
+        if len(text) <= chunk_size:
+            return [{
+                "index": 0,
+                "content": text,
+                "character_count": len(text),
+                "token_count": None
+            }]
+
+        # Simple character-based chunking
+        start = 0
         chunk_index = 0
 
-        for paragraph in paragraphs:
-            if len(current_chunk) + len(paragraph) > chunk_size and current_chunk:
+        while start < len(text):
+            end = min(start + chunk_size, len(text))
+
+            # Try to break at word boundary
+            if end < len(text):
+                space_pos = text.rfind(' ', start, end)
+                if space_pos > start:
+                    end = space_pos
+
+            chunk_content = text[start:end].strip()
+
+            if chunk_content:
                 chunks.append({
                     "index": chunk_index,
-                    "content": current_chunk.strip(),
-                    "character_count": len(current_chunk),
+                    "content": chunk_content,
+                    "character_count": len(chunk_content),
                     "token_count": None
                 })
-
-                current_chunk = current_chunk[-overlap:] + paragraph
                 chunk_index += 1
-            else:
-                current_chunk += paragraph + "\n\n"
 
-        if current_chunk.strip():
-            chunks.append({
-                "index": chunk_index,
-                "content": current_chunk.strip(),
-                "character_count": len(current_chunk),
-                "token_count": None
-            })
+            # Move start position with overlap
+            start = max(start + 1, end - overlap)
 
+        print(f"✅ Simple fallback created {len(chunks)} chunks")
         return chunks
 
     def generate_embeddings(self, texts: List[str]) -> List[List[float]]:
         """Generate embeddings using OpenAI following official best practices"""
+        if not texts:
+            raise ValueError("No texts provided for embedding generation")
+
+        # Filter out empty texts
+        valid_texts = [text.strip() for text in texts if text and text.strip()]
+
+        if not valid_texts:
+            raise ValueError("All provided texts are empty")
+
         try:
             # Process texts in batches
-            batch_size = 100
+            batch_size = 50  # Reduced batch size for stability
             all_embeddings = []
 
             # Model preference based on official docs
@@ -584,11 +826,11 @@ class PDFProcessor:
                     print(f"🧠 Trying {model_name} ({config['dimensions']} dimensions)")
 
                     # Process in batches
-                    for i in range(0, len(texts), batch_size):
-                        batch_texts = texts[i:i + batch_size]
+                    for i in range(0, len(valid_texts), batch_size):
+                        batch_texts = valid_texts[i:i + batch_size]
 
-                        # Validate token count for each text
-                        valid_texts = []
+                        # Validate and truncate texts if needed
+                        processed_texts = []
                         for text in batch_texts:
                             tokens = self.encoding.encode(text)
                             if len(tokens) > config['max_tokens']:
@@ -596,30 +838,45 @@ class PDFProcessor:
                                 truncated_tokens = tokens[:config['max_tokens']]
                                 text = self.encoding.decode(truncated_tokens)
                                 logger.warning(f"Text truncated to {config['max_tokens']} tokens")
-                            valid_texts.append(text)
+                            processed_texts.append(text)
 
-                        # Make API call
-                        response = self.openai_client.embeddings.create(
-                            model=model_name,
-                            input=valid_texts,
-                            encoding_format="float"  # Official recommendation
-                        )
+                        # Make API call with retry logic
+                        max_retries = 3
+                        retry_delay = 1.0
 
-                        # Extract embeddings
-                        batch_embeddings = [item.embedding for item in response.data]
-                        all_embeddings.extend(batch_embeddings)
+                        for attempt in range(max_retries):
+                            try:
+                                response = self.openai_client.embeddings.create(
+                                    model=model_name,
+                                    input=processed_texts,
+                                    encoding_format="float"
+                                )
 
-                        logger.info(f"Processed batch {i // batch_size + 1}/{(len(texts) - 1) // batch_size + 1}")
+                                # Extract embeddings
+                                batch_embeddings = [item.embedding for item in response.data]
+                                all_embeddings.extend(batch_embeddings)
+
+                                logger.info(f"Processed batch {i // batch_size + 1}/{(len(valid_texts) - 1) // batch_size + 1}")
+                                break  # Success, exit retry loop
+
+                            except Exception as batch_error:
+                                if attempt == max_retries - 1:
+                                    raise batch_error
+                                else:
+                                    print(f"⚠️ Batch attempt {attempt + 1} failed, retrying in {retry_delay}s...")
+                                    time.sleep(retry_delay)
+                                    retry_delay *= 2  # Exponential backoff
 
                     # Success with this model
                     logger.info(f"✅ Generated {len(all_embeddings)} embeddings with {model_name}")
                     print(f"✅ Generated {len(all_embeddings)} embeddings with {model_name}")
 
                     # Update global config if dimensions don't match
-                    actual_dimensions = len(all_embeddings[0])
-                    if actual_dimensions != settings.vector_dimension:
-                        print(
-                            f"💡 Note: Embeddings have {actual_dimensions} dimensions, config expects {settings.vector_dimension}")
+                    if all_embeddings:
+                        actual_dimensions = len(all_embeddings[0])
+                        if actual_dimensions != settings.vector_dimension:
+                            print(
+                                f"💡 Note: Embeddings have {actual_dimensions} dimensions, config expects {settings.vector_dimension}")
 
                     return all_embeddings
 
@@ -630,13 +887,15 @@ class PDFProcessor:
                     if "model_not_found" in error_str or "does not have access" in error_str:
                         logger.warning(f"No access to {model_name}")
                         continue
-                    elif "rate_limit" in error_str:
+                    elif "rate_limit" in error_str or "429" in error_str:
                         logger.warning(f"Rate limit for {model_name}")
-                        import time
-                        time.sleep(1)  # Brief pause before trying next model
+                        time.sleep(2)  # Brief pause before trying next model
                         continue
                     elif "quota" in error_str or "billing" in error_str:
                         logger.error(f"Billing issue with {model_name}")
+                        continue
+                    elif "invalid_request_error" in error_str and "empty" in error_str:
+                        logger.error(f"Empty input error with {model_name}")
                         continue
                     else:
                         logger.error(f"Unexpected error with {model_name}: {e}")
@@ -644,25 +903,28 @@ class PDFProcessor:
 
             # If all models fail
             raise Exception("""
-            No embedding models available. Common issues:
-            1. API key lacks embedding model access
-            2. Billing not set up or quota exceeded  
-            3. Rate limits exceeded
-
-            Solutions:
-            - Create new API key at https://platform.openai.com/api-keys
-            - Choose 'All' permissions (not project-specific)
-            - Verify billing at https://platform.openai.com/account/billing
-            - Check usage at https://platform.openai.com/usage
-            """)
+                               No embedding models available. Common issues:
+                               1. API key lacks embedding model access
+                               2. Billing not set up or quota exceeded  
+                               3. Rate limits exceeded
+                               4. All input texts are empty
+        
+                               Solutions:
+                               - Create new API key at https://platform.openai.com/api-keys
+                               - Choose 'All' permissions (not project-specific)
+                               - Verify billing at https://platform.openai.com/account/billing
+                               - Check usage at https://platform.openai.com/usage
+                               - Ensure input texts are not empty
+                               """)
 
         except Exception as e:
             logger.error(f"Embedding generation failed: {e}")
             raise
 
+
     def process_document(self, file_path: str, document_id: int, filename: str,
-                        progress_callback=None) -> Dict[str, Any]:
-        """Complete intelligent document processing pipeline"""
+                         progress_callback=None) -> Dict[str, Any]:
+        """Complete intelligent document processing pipeline with robust error handling"""
         try:
             if progress_callback:
                 progress_callback("📄 Starting PDF text extraction...")
@@ -670,32 +932,59 @@ class PDFProcessor:
             # Step 1: Extract text
             text = self.extract_text_from_pdf(file_path)
 
+            if not text or not text.strip():
+                raise ValueError("No text could be extracted from the PDF")
+
             if progress_callback:
                 progress_callback(f"✅ Extracted {len(text):,} characters")
                 progress_callback("🧠 Analyzing document structure...")
 
-            # Step 2: Analyze document structure
-            structure = self.analyze_document_structure(text, filename)
+            # Step 2: Analyze document structure with timeout protection
+            try:
+                structure = self.analyze_document_structure(text, filename)
+            except Exception as e:
+                print(f"📋 Structure analysis failed: {e}, using fallback")
+                structure = self._fallback_structure_analysis(text)
 
             if progress_callback:
-                progress_callback(f"✅ Detected {structure.document_type} with {structure.suggested_chunking_strategy} strategy")
+                progress_callback(
+                    f"✅ Detected {structure.document_type} with {structure.suggested_chunking_strategy} strategy")
                 progress_callback("✂️ Creating intelligent chunks...")
 
-            # Step 3: Apply appropriate chunking strategy
-            if structure.suggested_chunking_strategy == "hierarchical" or structure.has_hierarchical_structure:
-                chunks = self.hierarchical_chunking(text, structure)
-            else:
-                chunks = self.semantic_chunking(text, structure)
+            # Step 3: Apply appropriate chunking strategy with fallbacks
+            chunks = []
+            try:
+                if (settings.enable_intelligent_chunking and
+                        structure.suggested_chunking_strategy == "hierarchical" and
+                        structure.has_hierarchical_structure):
+                    chunks = self.hierarchical_chunking(text, structure)
+                else:
+                    chunks = self.semantic_chunking(text, structure)
+            except Exception as e:
+                print(f"📋 Intelligent chunking failed: {e}, using fallback")
+                chunks = self._fallback_chunking(text, 0)
 
-            # Step 4: Enhance chunks with context
-            chunks = self.enhance_chunks_with_context(chunks)
+            # Ensure we have chunks
+            if not chunks:
+                print("📋 No chunks created, using emergency fallback")
+                chunks = self._emergency_chunking(text)
+
+            # Step 4: Enhance chunks with context (with error protection)
+            try:
+                chunks = self.enhance_chunks_with_context(chunks)
+            except Exception as e:
+                print(f"📋 Context enhancement failed: {e}, continuing without enhancement")
 
             if progress_callback:
                 progress_callback(f"✅ Created {len(chunks)} intelligent chunks")
                 progress_callback("🧠 Generating embeddings...")
 
             # Step 5: Generate embeddings
-            chunk_texts = [chunk.content for chunk in chunks]
+            chunk_texts = [chunk.content for chunk in chunks if chunk.content.strip()]
+
+            if not chunk_texts:
+                raise ValueError("No valid chunk content for embedding generation")
+
             embeddings = self.generate_embeddings(chunk_texts)
 
             if progress_callback:
@@ -709,6 +998,7 @@ class PDFProcessor:
                 chunk.document_id = document_id
                 chunk.filename = filename
 
+                # Convert ChunkMetadata to dictionary format
                 metadata = {
                     "document_id": document_id,
                     "filename": filename,
@@ -747,10 +1037,101 @@ class PDFProcessor:
             if progress_callback:
                 progress_callback(f"❌ Error: {str(e)}")
             logger.error(f"Error processing document: {e}")
+
+            # Try emergency fallback processing
+            try:
+                print("📋 Attempting emergency fallback processing...")
+
+                # Extract text again (in case that failed)
+                if 'text' not in locals():
+                    text = self.extract_text_from_pdf(file_path)
+
+                if text and text.strip():
+                    # Use simple chunking
+                    simple_chunks = self.chunk_text(text)
+
+                    if simple_chunks:
+                        # Generate embeddings for simple chunks
+                        chunk_texts = [chunk["content"] for chunk in simple_chunks if chunk["content"].strip()]
+
+                        if chunk_texts:
+                            embeddings = self.generate_embeddings(chunk_texts)
+
+                            # Prepare simple metadata
+                            metadata_list = []
+                            for chunk in simple_chunks:
+                                metadata = {
+                                    "document_id": document_id,
+                                    "filename": filename,
+                                    "chunk_index": chunk["index"],
+                                    "chunk_type": "fallback",
+                                    "section_hierarchy": [],
+                                    "content": chunk["content"],
+                                    "character_count": chunk["character_count"],
+                                    "token_count": chunk.get("token_count"),
+                                    "semantic_summary": "",
+                                    "context_window": "",
+                                    "relationships": [],
+                                    "document_type": "document",
+                                    "chunking_strategy": "fallback"
+                                }
+                                metadata_list.append(metadata)
+
+                            print("✅ Emergency fallback processing succeeded!")
+                            return {
+                                "success": True,
+                                "chunks_created": len(simple_chunks),
+                                "embeddings": embeddings,
+                                "metadata": metadata_list,
+                                "total_characters": len(text),
+                                "document_structure": {
+                                    "type": "document",
+                                    "strategy": "fallback",
+                                    "sections": 0,
+                                    "hierarchical": False
+                                }
+                            }
+            except Exception as fallback_error:
+                print(f"❌ Emergency fallback also failed: {fallback_error}")
+
             return {
                 "success": False,
                 "error": str(e)
             }
+
+
+    def _emergency_chunking(self, text: str) -> List[ChunkMetadata]:
+        """Emergency chunking when all else fails"""
+        if not text or not text.strip():
+            return []
+
+        text = text.strip()
+
+        # Very simple chunking - just split by character count
+        chunk_size = 1000
+        chunks = []
+
+        for i in range(0, len(text), chunk_size):
+            chunk_text = text[i:i + chunk_size]
+
+            chunk = ChunkMetadata(
+                document_id=0,
+                filename="",
+                chunk_index=i // chunk_size,
+                chunk_type="emergency",
+                section_hierarchy=[],
+                content=chunk_text,
+                character_count=len(chunk_text),
+                token_count=len(self.encoding.encode(chunk_text)),
+                semantic_summary="",
+                context_window="",
+                relationships=[]
+            )
+            chunks.append(chunk)
+
+        print(f"📋 Emergency chunking created {len(chunks)} chunks")
+        return chunks
+
 
 # Global instance
 pdf_processor = PDFProcessor()

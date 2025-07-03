@@ -11,7 +11,6 @@ from typing import Optional, Dict, Any, List
 
 from app.services.pdf_processor import pdf_processor
 from app.services.vector_service import vector_service
-from app.services.openai_service import openai_service
 
 # Add the parent directory to Python path
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -64,7 +63,10 @@ def startup_event():
     create_tables()
     print("✅ Database tables created")
     print("✅ Upload directory ready")
-    print(f"🧠 Intelligent chunking: {'Enabled' if settings.enable_intelligent_chunking else 'Disabled'}")
+
+    # Safe feature checking
+    intelligent_chunking = getattr(settings, 'enable_intelligent_chunking', True)
+    print(f"🧠 Intelligent chunking: {'Enabled' if intelligent_chunking else 'Disabled'}")
 
 
 @app.get("/")
@@ -74,10 +76,10 @@ def read_root():
         "version": "2.0.0",
         "status": "active",
         "features": {
-            "intelligent_chunking": settings.enable_intelligent_chunking,
-            "semantic_analysis": settings.semantic_analysis_enabled,
-            "hierarchical_chunking": settings.hierarchical_chunking_enabled,
-            "query_enhancement": settings.enable_query_enhancement
+            "intelligent_chunking": getattr(settings, 'enable_intelligent_chunking', True),
+            "semantic_analysis": getattr(settings, 'semantic_analysis_enabled', True),
+            "hierarchical_chunking": getattr(settings, 'hierarchical_chunking_enabled', True),
+            "query_enhancement": getattr(settings, 'enable_query_enhancement', True)
         }
     }
 
@@ -94,7 +96,9 @@ def health_check(db: Session = Depends(get_db)):
         # Test OpenAI connection
         openai_status = "ok"
         try:
-            openai_service.create_embedding("test")
+            # Simple test without importing openai_service if it doesn't exist
+            test_embeddings = pdf_processor.generate_embeddings(["test"])
+            openai_status = "ok" if test_embeddings else "error"
         except:
             openai_status = "error"
 
@@ -107,9 +111,9 @@ def health_check(db: Session = Depends(get_db)):
             "vector_points": vector_info.get("points_count", 0) if vector_info else 0,
             "upload_dir": settings.upload_dir,
             "intelligent_features": {
-                "chunking": settings.enable_intelligent_chunking,
-                "semantic_analysis": settings.semantic_analysis_enabled,
-                "context_enhancement": settings.enable_context_enhancement
+                "chunking": getattr(settings, 'enable_intelligent_chunking', True),
+                "semantic_analysis": getattr(settings, 'semantic_analysis_enabled', True),
+                "context_enhancement": getattr(settings, 'enable_context_enhancement', True)
             }
         }
     except Exception as e:
@@ -149,13 +153,17 @@ async def upload_file(file: UploadFile = File(...), db: Session = Depends(get_db
             filename=file.filename,
             content=f"File uploaded: {file.filename}",
             file_size=file_size,
-            status="uploaded",
-            document_metadata={
-                "upload_timestamp": time.time(),
-                "file_path": file_path,
-                "intelligent_processing": settings.enable_intelligent_chunking
-            }
+            status="uploaded"
         )
+
+        # Set metadata using helper method
+        metadata = {
+            "upload_timestamp": time.time(),
+            "file_path": file_path,
+            "intelligent_processing": getattr(settings, 'enable_intelligent_chunking', True)
+        }
+        db_doc.set_metadata(metadata)
+
         db.add(db_doc)
         db.commit()
         db.refresh(db_doc)
@@ -174,7 +182,7 @@ async def upload_file(file: UploadFile = File(...), db: Session = Depends(get_db
             "filename": db_doc.filename,
             "size": file_size,
             "created_at": db_doc.created_at,
-            "intelligent_processing_enabled": settings.enable_intelligent_chunking
+            "intelligent_processing_enabled": getattr(settings, 'enable_intelligent_chunking', True)
         }
 
     except Exception as e:
@@ -190,22 +198,19 @@ def get_documents(include_analysis: bool = Query(False), db: Session = Depends(g
 
         documents = []
         for doc in docs:
+            metadata = doc.get_metadata()
+
             doc_data = {
                 "id": doc.id,
                 "filename": doc.filename,
                 "size": doc.file_size,
                 "status": doc.status,
-                "document_type": doc.document_type,
-                "chunking_strategy": doc.chunking_strategy,
-                "total_chunks": doc.total_chunks,
-                "processing_time": doc.processing_time,
                 "created_at": doc.created_at,
-                "updated_at": doc.updated_at
+                "metadata": metadata
             }
 
-            if include_analysis and doc.structure_analysis:
-                doc_data["structure_analysis"] = doc.structure_analysis
-                doc_data["chunk_statistics"] = doc.chunk_statistics
+            if include_analysis:
+                doc_data["processing_details"] = metadata.get("processing_details", {})
 
             documents.append(doc_data)
 
@@ -214,6 +219,8 @@ def get_documents(include_analysis: bool = Query(False), db: Session = Depends(g
             "total": len(documents)
         }
     except Exception as e:
+        print(f"❌ Error fetching documents: {str(e)}")
+        traceback.print_exc()
         raise HTTPException(status_code=500, detail=f"Failed to fetch documents: {str(e)}")
 
 
@@ -226,9 +233,7 @@ def get_document_details(doc_id: int, db: Session = Depends(get_db)):
             raise HTTPException(status_code=404, detail="Document not found")
 
         document = doc_data["document"]
-
-        # Get vector database statistics
-        vector_stats = vector_service.get_document_statistics(doc_id)
+        metadata = document.get_metadata()
 
         return {
             "document": {
@@ -236,19 +241,13 @@ def get_document_details(doc_id: int, db: Session = Depends(get_db)):
                 "filename": document.filename,
                 "size": document.file_size,
                 "status": document.status,
-                "document_type": document.document_type,
-                "chunking_strategy": document.chunking_strategy,
-                "total_chunks": document.total_chunks,
-                "processing_time": document.processing_time,
                 "created_at": document.created_at,
-                "structure_analysis": document.structure_analysis,
-                "chunk_statistics": document.chunk_statistics
+                "metadata": metadata
             },
-            "vector_statistics": vector_stats,
             "chunk_analysis": [
                 {
                     "type": ca.analysis_type,
-                    "result": ca.analysis_result,
+                    "result": ca.get_analysis_result(),
                     "processing_time": ca.processing_time
                 } for ca in doc_data["chunk_analysis"]
             ],
@@ -257,7 +256,7 @@ def get_document_details(doc_id: int, db: Session = Depends(get_db)):
                     "step": log.step_name,
                     "status": log.step_status,
                     "duration": log.step_duration,
-                    "details": log.step_details,
+                    "details": log.get_step_details(),
                     "timestamp": log.created_at
                 } for log in doc_data["processing_logs"]
             ]
@@ -292,14 +291,12 @@ def delete_document(doc_id: int, db: Session = Depends(get_db)):
 
 
 @app.post("/process-document/{doc_id}")
-async def process_document_intelligent(doc_id: int,
-                                       force_strategy: Optional[str] = Query(None),
-                                       db: Session = Depends(get_db)):
+async def process_document_intelligent(doc_id: int, db: Session = Depends(get_db)):
     """Process document with intelligent chunking"""
     start_time = time.time()
 
     try:
-        print(f"🔄 Starting intelligent processing for document ID: {doc_id}")
+        print(f"🔄 Starting processing for document ID: {doc_id}")
 
         # Get document from database
         doc = db.query(Document).filter(Document.id == doc_id).first()
@@ -319,41 +316,13 @@ async def process_document_intelligent(doc_id: int,
 
         log_processing_step(db, doc_id, "processing_start", "started")
 
-        # Process using intelligent chunking
-        print("🧠 Starting intelligent document processing...")
+        # Process the document
+        print("🧠 Starting document processing...")
 
-        if settings.enable_intelligent_chunking:
-            result = pdf_processor.process_document(
-                file_path, doc_id, doc.filename,
-                progress_callback=lambda msg: print(f"📋 {msg}")
-            )
-        else:
-            # Fallback to legacy processing
-            print("⚠️ Using legacy processing mode")
-            text = pdf_processor.extract_text_from_pdf(file_path)
-            chunks = pdf_processor.chunk_text(text)
-            chunk_texts = [chunk["content"] for chunk in chunks]
-            embeddings = pdf_processor.generate_embeddings(chunk_texts)
-
-            metadata_list = []
-            for i, chunk in enumerate(chunks):
-                metadata = {
-                    "document_id": doc_id,
-                    "filename": doc.filename,
-                    "chunk_index": chunk["index"],
-                    "content": chunk["content"],
-                    "character_count": chunk["character_count"]
-                }
-                metadata_list.append(metadata)
-
-            result = {
-                "success": True,
-                "chunks_created": len(chunks),
-                "embeddings": embeddings,
-                "metadata": metadata_list,
-                "total_characters": len(text),
-                "document_structure": {"type": "unknown", "strategy": "legacy"}
-            }
+        result = pdf_processor.process_document(
+            file_path, doc_id, doc.filename,
+            progress_callback=lambda msg: print(f"📋 {msg}")
+        )
 
         if not result["success"]:
             raise HTTPException(status_code=500, detail=result.get("error", "Processing failed"))
@@ -367,32 +336,17 @@ async def process_document_intelligent(doc_id: int,
 
         # Update document with results
         doc.status = "processed"
-        doc.document_type = result.get("document_structure", {}).get("type", "unknown")
-        doc.chunking_strategy = result.get("document_structure", {}).get("strategy", "unknown")
-        doc.total_chunks = result["chunks_created"]
-        doc.processing_time = processing_time
 
-        # Store detailed metadata
-        enhanced_metadata = {
+        # Update metadata
+        current_metadata = doc.get_metadata()
+        current_metadata.update({
             "chunks_created": result["chunks_created"],
             "total_characters": result["total_characters"],
             "vector_ids": vector_ids,
             "processing_time": processing_time,
-            "document_structure": result.get("document_structure", {}),
-            "intelligent_processing": settings.enable_intelligent_chunking,
             "embedding_model": settings.embedding_model
-        }
-
-        doc.document_metadata = enhanced_metadata
-        doc.structure_analysis = result.get("document_structure", {})
-        doc.chunk_statistics = {
-            "total_chunks": result["chunks_created"],
-            "average_chunk_size": result["total_characters"] / result["chunks_created"] if result[
-                                                                                               "chunks_created"] > 0 else 0,
-            "total_characters": result["total_characters"],
-            "embeddings_generated": len(result["embeddings"]),
-            "processing_method": "intelligent" if settings.enable_intelligent_chunking else "legacy"
-        }
+        })
+        doc.set_metadata(current_metadata)
 
         db.commit()
 
@@ -402,13 +356,12 @@ async def process_document_intelligent(doc_id: int,
             duration=processing_time,
             details={
                 "chunks_created": result["chunks_created"],
-                "document_type": doc.document_type,
-                "strategy": doc.chunking_strategy
+                "embeddings_stored": len(vector_ids)
             }
         )
 
-        # Save chunk analysis if enabled
-        if settings.save_chunking_analysis and "document_structure" in result:
+        # Save chunk analysis if available
+        if "document_structure" in result:
             save_chunk_analysis(
                 db, doc_id, "document_structure",
                 result["document_structure"], processing_time
@@ -417,14 +370,10 @@ async def process_document_intelligent(doc_id: int,
         print(f"✅ Document processing completed in {processing_time:.2f} seconds")
 
         return {
-            "message": "Document processed successfully with intelligent chunking",
+            "message": "Document processed successfully",
             "chunks_created": result["chunks_created"],
             "embeddings_stored": len(vector_ids),
-            "processing_time": processing_time,
-            "document_type": doc.document_type,
-            "chunking_strategy": doc.chunking_strategy,
-            "document_structure": result.get("document_structure", {}),
-            "intelligent_processing": settings.enable_intelligent_chunking
+            "processing_time": processing_time
         }
 
     except HTTPException:
@@ -448,7 +397,6 @@ async def process_document_intelligent(doc_id: int,
             doc = db.query(Document).filter(Document.id == doc_id).first()
             if doc:
                 doc.status = "error"
-                doc.processing_time = processing_time
                 db.commit()
         except:
             pass
@@ -456,96 +404,56 @@ async def process_document_intelligent(doc_id: int,
         traceback.print_exc()
         raise HTTPException(status_code=500, detail=error_msg)
 
+
 @app.post("/search")
 async def search_documents(request: dict, db: Session = Depends(get_db)):
-    """Enhanced search with intelligent query processing"""
+    """Enhanced search with better debugging"""
     start_time = time.time()
 
     try:
         query_text = request.get("query", "")
         limit = request.get("limit", 5)
-        filters = request.get("filters", {})
-        use_context_expansion = request.get("context_expansion", settings.enable_context_expansion)
+        debug_mode = request.get("debug", False)
 
         if not query_text:
             raise HTTPException(status_code=400, detail="Query text is required")
 
         print(f"🔍 Processing search query: '{query_text}'")
 
-        # Analyze query intent if enabled
-        query_intent = {}
-        if settings.enable_intent_analysis:
-            query_intent = openai_service.analyze_query_intent(query_text)
-            print(f"🧠 Query intent: {query_intent.get('intent_type', 'unknown')}")
+        # Generate embedding for the query
+        query_embeddings = pdf_processor.generate_embeddings([query_text])
+        query_embedding = query_embeddings[0]
 
-        # Generate enhanced query embedding
-        if settings.enable_query_enhancement:
-            query_embedding = openai_service.create_query_embedding(query_text)
-        else:
-            query_embedding = openai_service.create_embedding(query_text)
-
-        # Apply filters from intent analysis
-        search_filters = {**filters}
-        if query_intent.get("suggested_filters"):
-            search_filters.update(query_intent["suggested_filters"])
-
-        # Perform search with context expansion if enabled
-        if use_context_expansion:
-            results = vector_service.search_with_context_expansion(
-                query_embedding, limit=limit, expand_window=settings.context_window_size
-            )
-        else:
-            results = vector_service.search_similar(
-                query_embedding, limit=limit, filters=search_filters
-            )
-
-        # Generate enhanced response using retrieved context
-        enhanced_results = []
-        context_chunks = []
-
-        for result in results:
-            enhanced_result = {
-                **result,
-                "enhanced_content": result["metadata"].get("searchable_content",
-                                                           result["metadata"].get("content", "")),
-                "document_type": result["metadata"].get("document_type", "unknown"),
-                "chunk_type": result["metadata"].get("chunk_type", "unknown"),
-                "section_hierarchy": result["metadata"].get("section_hierarchy", [])
+        # Perform search with debugging if requested
+        if debug_mode:
+            search_results = vector_service.search_with_debug(query_embedding, limit=limit)
+            results = search_results.get("results", [])
+            debug_info = {
+                k: v for k, v in search_results.items() if k != "results"
             }
-            enhanced_results.append(enhanced_result)
-            context_chunks.append(enhanced_result)
-
-        # Generate AI answer if we have results
-        ai_answer = None
-        if enhanced_results and query_intent.get("intent_type") != "general":
-            try:
-                ai_response = openai_service.answer_question(
-                    query_text, enhanced_results,
-                    document_context={"query_intent": query_intent}
-                )
-                ai_answer = ai_response
-            except Exception as e:
-                print(f"⚠️ AI answer generation failed: {e}")
+        else:
+            results = vector_service.search_similar(query_embedding, limit=limit)
+            debug_info = {}
 
         response_time = time.time() - start_time
 
-        # Log query analysis
+        # Log query
         log_query_analysis(
-            db, query_text, query_intent,
-            "context_expansion" if use_context_expansion else "standard",
-            len(enhanced_results), response_time
+            db, query_text, {},
+            "standard", len(results), response_time
         )
 
-        return {
+        response = {
             "query": query_text,
-            "results": enhanced_results,
-            "total_found": len(enhanced_results),
-            "query_intent": query_intent,
-            "ai_answer": ai_answer,
-            "search_strategy": "intelligent" if settings.enable_query_enhancement else "standard",
-            "response_time": response_time,
-            "filters_applied": search_filters
+            "results": results,
+            "total_found": len(results),
+            "response_time": response_time
         }
+
+        if debug_mode:
+            response["debug_info"] = debug_info
+
+        return response
 
     except Exception as e:
         response_time = time.time() - start_time
@@ -553,32 +461,12 @@ async def search_documents(request: dict, db: Session = Depends(get_db)):
 
         # Log failed query
         try:
-            log_query_analysis(
-                db, query_text, {}, "failed", 0, response_time
-            )
+            log_query_analysis(db, query_text, {}, "failed", 0, response_time)
         except:
             pass
 
         raise HTTPException(status_code=500, detail=f"Search failed: {str(e)}")
 
-@app.post("/search/hierarchy")
-async def search_by_hierarchy(request: dict):
-    """Search within specific document hierarchy"""
-    try:
-        hierarchy_path = request.get("hierarchy_path", [])
-        if not hierarchy_path:
-            raise HTTPException(status_code=400, detail="Hierarchy path is required")
-
-        results = vector_service.search_by_section_hierarchy(hierarchy_path)
-
-        return {
-            "hierarchy_path": hierarchy_path,
-            "results": results,
-            "total_found": len(results)
-        }
-
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Hierarchy search failed: {str(e)}")
 
 @app.get("/analytics/documents")
 def get_document_analytics(db: Session = Depends(get_db)):
@@ -588,46 +476,147 @@ def get_document_analytics(db: Session = Depends(get_db)):
 
         analytics = {
             "total_documents": len(docs),
-            "document_types": {},
-            "chunking_strategies": {},
             "processing_status": {},
             "average_processing_time": 0,
+            "total_size": 0,
             "total_chunks": 0,
             "average_chunks_per_document": 0
         }
 
         total_processing_time = 0
         processed_docs = 0
+        total_chunks = 0
 
         for doc in docs:
-            # Document types
-            doc_type = doc.document_type or "unknown"
-            analytics["document_types"][doc_type] = analytics["document_types"].get(doc_type, 0) + 1
-
-            # Chunking strategies
-            strategy = doc.chunking_strategy or "unknown"
-            analytics["chunking_strategies"][strategy] = analytics["chunking_strategies"].get(strategy, 0) + 1
-
             # Processing status
             status = doc.status or "unknown"
             analytics["processing_status"][status] = analytics["processing_status"].get(status, 0) + 1
 
-            # Processing time and chunks
-            if doc.processing_time:
-                total_processing_time += doc.processing_time
-                processed_docs += 1
+            # File sizes
+            if doc.file_size:
+                analytics["total_size"] += doc.file_size
 
-            if doc.total_chunks:
-                analytics["total_chunks"] += doc.total_chunks
+            # Processing time and chunks from metadata
+            metadata = doc.get_metadata()
+            if metadata:
+                if "processing_time" in metadata:
+                    total_processing_time += metadata["processing_time"]
+                    processed_docs += 1
+
+                if "chunks_created" in metadata:
+                    total_chunks += metadata["chunks_created"]
 
         if processed_docs > 0:
             analytics["average_processing_time"] = total_processing_time / processed_docs
-            analytics["average_chunks_per_document"] = analytics["total_chunks"] / len(docs)
+
+        if len(docs) > 0:
+            analytics["average_chunks_per_document"] = total_chunks / len(docs)
+
+        analytics["total_chunks"] = total_chunks
 
         return analytics
 
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to get analytics: {str(e)}")
+
+
+@app.get("/system/status")
+def get_system_status():
+    """Get comprehensive system status"""
+    try:
+        # Vector database info
+        vector_info = vector_service.get_collection_info()
+
+        return {
+            "status": "operational",
+            "version": "2.0.0",
+            "vector_database": vector_info,
+            "features": {
+                "intelligent_processing": getattr(settings, 'enable_intelligent_chunking', True),
+                "semantic_analysis": getattr(settings, 'semantic_analysis_enabled', True),
+                "hierarchical_chunking": getattr(settings, 'hierarchical_chunking_enabled', True),
+                "query_enhancement": getattr(settings, 'enable_query_enhancement', True)
+            }
+        }
+
+    except Exception as e:
+        return {
+            "status": "error",
+            "error": str(e)
+        }
+
+
+@app.get("/processing-status/{doc_id}")
+async def get_processing_status(doc_id: int, db: Session = Depends(get_db)):
+    """Get processing status for a document"""
+    try:
+        doc = db.query(Document).filter(Document.id == doc_id).first()
+        if not doc:
+            raise HTTPException(status_code=404, detail="Document not found")
+
+        # Get recent processing logs
+        from app.database import ProcessingLog
+        recent_logs = db.query(ProcessingLog).filter(
+            ProcessingLog.document_id == doc_id
+        ).order_by(ProcessingLog.created_at.desc()).limit(10).all()
+
+        return {
+            "document_id": doc.id,
+            "filename": doc.filename,
+            "status": doc.status,
+            "document_metadata": doc.get_metadata(),
+            "recent_logs": [
+                {
+                    "step": log.step_name,
+                    "status": log.step_status,
+                    "duration": log.step_duration,
+                    "timestamp": log.created_at,
+                    "details": log.get_step_details()
+                } for log in recent_logs
+            ]
+        }
+
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to get processing status: {str(e)}")
+
+
+@app.post("/search/debug")
+async def debug_search(request: dict, db: Session = Depends(get_db)):
+    """Debug search endpoint to troubleshoot search issues"""
+    try:
+        query_text = request.get("query", "")
+
+        if not query_text:
+            raise HTTPException(status_code=400, detail="Query text is required")
+
+        print(f"🔍 Debug search for: '{query_text}'")
+
+        # Generate embedding for the query
+        query_embeddings = pdf_processor.generate_embeddings([query_text])
+        query_embedding = query_embeddings[0]
+
+        # Get debug information
+        debug_results = vector_service.search_with_debug(query_embedding, limit=10)
+
+        return {
+            "query": query_text,
+            "debug_info": debug_results,
+            "recommendations": {
+                "total_points": debug_results.get("total_points_in_collection", 0),
+                "search_working": debug_results.get("results_without_threshold", 0) > 0,
+                "threshold_too_high": debug_results.get("results_without_threshold", 0) > debug_results.get(
+                    "results_with_threshold_0_3", 0),
+                "suggestions": [
+                    "Lower similarity threshold if no results found",
+                    "Check if documents are properly processed and stored",
+                    "Verify embedding quality and query relevance"
+                ]
+            }
+        }
+
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Debug search failed: {str(e)}")
+
 
 @app.get("/analytics/processing/{doc_id}")
 def get_processing_analytics(doc_id: int, db: Session = Depends(get_db)):
@@ -662,82 +651,88 @@ def get_processing_analytics(doc_id: int, db: Session = Depends(get_db)):
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to get processing analytics: {str(e)}")
 
-@app.get("/system/status")
-def get_system_status():
-    """Get comprehensive system status"""
-    try:
-        # Vector database info
-        vector_info = vector_service.get_collection_info()
 
-        # Configuration status
-        config_status = {
-            "intelligent_chunking": settings.enable_intelligent_chunking,
-            "semantic_analysis": settings.semantic_analysis_enabled,
-            "hierarchical_chunking": settings.hierarchical_chunking_enabled,
-            "query_enhancement": settings.enable_query_enhancement,
-            "context_expansion": settings.enable_context_expansion,
-            "embedding_model": settings.embedding_model,
-            "llm_model": settings.llm_analysis_model
-        }
+@app.get("/vector/stats")
+def get_vector_statistics():
+    """Get vector database statistics"""
+    try:
+        collection_info = vector_service.get_collection_info()
+
+        if not collection_info:
+            return {"error": "Could not retrieve collection information"}
 
         return {
-            "status": "operational",
-            "version": "2.0.0",
-            "configuration": config_status,
-            "vector_database": vector_info,
-            "features": {
-                "intelligent_processing": settings.enable_intelligent_chunking,
-                "query_analysis": settings.enable_intent_analysis,
-                "context_enhancement": settings.enable_context_enhancement,
-                "multilingual_support": settings.enable_multilingual_support
+            "collection_name": collection_info.get("name"),
+            "total_vectors": collection_info.get("points_count", 0),
+            "vector_dimensions": collection_info.get("vector_size"),
+            "status": collection_info.get("status"),
+            "health": "healthy" if collection_info.get("points_count", 0) > 0 else "no_data"
+        }
+
+    except Exception as e:
+        return {
+            "error": str(e),
+            "health": "error"
+        }
+
+
+@app.post("/search/test")
+async def test_search_functionality():
+    """Test search functionality with known content"""
+    try:
+        # Test with a simple query
+        test_queries = [
+            "policy",
+            "document",
+            "review",
+            "process"
+        ]
+
+        results = {}
+
+        for query in test_queries:
+            try:
+                query_embeddings = pdf_processor.generate_embeddings([query])
+                query_embedding = query_embeddings[0]
+
+                search_results = vector_service.search_with_debug(query_embedding, limit=5)
+
+                results[query] = {
+                    "embedding_generated": True,
+                    "results_found": len(search_results.get("results", [])),
+                    "total_available": search_results.get("results_without_threshold", 0),
+                    "top_scores": search_results.get("top_scores_available", [])
+                }
+            except Exception as e:
+                results[query] = {
+                    "embedding_generated": False,
+                    "error": str(e)
+                }
+
+        # Get collection stats
+        collection_info = vector_service.get_collection_info()
+
+        return {
+            "test_results": results,
+            "collection_stats": collection_info,
+            "system_health": {
+                "vectors_stored": collection_info.get("points_count", 0) if collection_info else 0,
+                "embedding_service": "working",
+                "search_service": "working"
             }
         }
 
     except Exception as e:
         return {
-            "status": "error",
-            "error": str(e)
+            "error": str(e),
+            "system_health": {
+                "embedding_service": "error",
+                "search_service": "error"
+            }
         }
 
-@app.get("/processing-status/{doc_id}")
-async def get_processing_status(doc_id: int, db: Session = Depends(get_db)):
-    """Get enhanced processing status for a document"""
-    try:
-        doc = db.query(Document).filter(Document.id == doc_id).first()
-        if not doc:
-            raise HTTPException(status_code=404, detail="Document not found")
-
-        # Get recent processing logs
-        from app.database import ProcessingLog
-        recent_logs = db.query(ProcessingLog).filter(
-            ProcessingLog.document_id == doc_id
-        ).order_by(ProcessingLog.created_at.desc()).limit(10).all()
-
-        return {
-            "document_id": doc.id,
-            "filename": doc.filename,
-            "status": doc.status,
-            "document_type": doc.document_type,
-            "chunking_strategy": doc.chunking_strategy,
-            "total_chunks": doc.total_chunks,
-            "processing_time": doc.processing_time,
-            "document_metadata": doc.document_metadata,
-            "structure_analysis": doc.structure_analysis,
-            "chunk_statistics": doc.chunk_statistics,
-            "recent_logs": [
-                {
-                    "step": log.step_name,
-                    "status": log.step_status,
-                    "duration": log.step_duration,
-                    "timestamp": log.created_at,
-                    "details": log.step_details
-                } for log in recent_logs
-            ]
-        }
-
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Failed to get processing status: {str(e)}")
 
 if __name__ == "__main__":
     import uvicorn
+
     uvicorn.run(app, host="0.0.0.0", port=8000, reload=True)

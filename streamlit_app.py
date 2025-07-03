@@ -655,7 +655,7 @@ elif page == "🔍 Search & Query":
 
                 with st.spinner("Testing OpenAI..."):
                     response = client.chat.completions.create(
-                        model="gpt-3.5-turbo",
+                        model="gpt-4o-mini",
                         messages=[{"role": "user", "content": "Say 'OpenAI API Working!'"}],
                         max_tokens=20
                     )

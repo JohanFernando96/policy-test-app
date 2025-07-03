@@ -1,9 +1,10 @@
-from sqlalchemy import create_engine, Column, Integer, String, Text, DateTime, JSON, Float
+from sqlalchemy import create_engine, Column, Integer, String, Text, DateTime, Float
 from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import sessionmaker
 from sqlalchemy.sql import func
 import os
 import sys
+import json
 
 # Add parent directory to path
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -11,7 +12,7 @@ sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from app.config import settings
 
 # Create engine
-engine = create_engine(settings.database_url, echo=settings.debug)
+engine = create_engine(settings.database_url, echo=settings.debug if hasattr(settings, 'debug') else False)
 
 # Create session
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
@@ -21,7 +22,7 @@ Base = declarative_base()
 
 
 class Document(Base):
-    """Enhanced Document model with intelligent chunking support"""
+    """Simplified Document model compatible with existing MySQL schema"""
     __tablename__ = "documents"
 
     id = Column(Integer, primary_key=True)
@@ -29,23 +30,25 @@ class Document(Base):
     content = Column(Text)
     file_size = Column(Integer)
     status = Column(String(50), default="uploaded")
-    document_metadata = Column(JSON)  # Enhanced to store JSON metadata
+    document_metadata = Column(Text)  # Store JSON as TEXT for compatibility
     created_at = Column(DateTime, server_default=func.now())
-    updated_at = Column(DateTime, server_default=func.now(), onupdate=func.now())
 
-    # Intelligent chunking specific fields
-    document_type = Column(String(100))  # policy, agreement, manual, etc.
-    chunking_strategy = Column(String(100))  # hierarchical, semantic, hybrid
-    total_chunks = Column(Integer, default=0)
-    processing_time = Column(Float)  # seconds
+    # Simple helper methods for JSON metadata
+    def get_metadata(self):
+        """Get metadata as dictionary"""
+        if self.document_metadata:
+            try:
+                return json.loads(self.document_metadata)
+            except:
+                return {}
+        return {}
 
-    # Analysis results
-    structure_analysis = Column(JSON)  # Document structure analysis
-    chunk_statistics = Column(JSON)  # Chunking statistics
-
-    # Version tracking
-    version = Column(String(50), default="1.0")
-    parent_document_id = Column(Integer)  # For document versioning
+    def set_metadata(self, metadata_dict):
+        """Set metadata from dictionary"""
+        if metadata_dict:
+            self.document_metadata = json.dumps(metadata_dict)
+        else:
+            self.document_metadata = None
 
 
 class ChunkAnalysis(Base):
@@ -55,9 +58,25 @@ class ChunkAnalysis(Base):
     id = Column(Integer, primary_key=True)
     document_id = Column(Integer, nullable=False)
     analysis_type = Column(String(100))  # structure, semantic, hierarchical
-    analysis_result = Column(JSON)
+    analysis_result = Column(Text)  # Store JSON as TEXT
     processing_time = Column(Float)
     created_at = Column(DateTime, server_default=func.now())
+
+    def get_analysis_result(self):
+        """Get analysis result as dictionary"""
+        if self.analysis_result:
+            try:
+                return json.loads(self.analysis_result)
+            except:
+                return {}
+        return {}
+
+    def set_analysis_result(self, result_dict):
+        """Set analysis result from dictionary"""
+        if result_dict:
+            self.analysis_result = json.dumps(result_dict)
+        else:
+            self.analysis_result = None
 
 
 class ProcessingLog(Base):
@@ -69,9 +88,25 @@ class ProcessingLog(Base):
     step_name = Column(String(100))
     step_status = Column(String(50))  # started, completed, failed
     step_duration = Column(Float)
-    step_details = Column(JSON)
+    step_details = Column(Text)  # Store JSON as TEXT
     error_message = Column(Text)
     created_at = Column(DateTime, server_default=func.now())
+
+    def get_step_details(self):
+        """Get step details as dictionary"""
+        if self.step_details:
+            try:
+                return json.loads(self.step_details)
+            except:
+                return {}
+        return {}
+
+    def set_step_details(self, details_dict):
+        """Set step details from dictionary"""
+        if details_dict:
+            self.step_details = json.dumps(details_dict)
+        else:
+            self.step_details = None
 
 
 class QueryAnalysis(Base):
@@ -80,12 +115,28 @@ class QueryAnalysis(Base):
 
     id = Column(Integer, primary_key=True)
     query_text = Column(Text, nullable=False)
-    query_intent = Column(JSON)  # Intent analysis results
+    query_intent = Column(Text)  # Store JSON as TEXT
     search_strategy = Column(String(100))
     results_count = Column(Integer)
     response_time = Column(Float)
     user_feedback = Column(Float)  # Optional rating
     created_at = Column(DateTime, server_default=func.now())
+
+    def get_query_intent(self):
+        """Get query intent as dictionary"""
+        if self.query_intent:
+            try:
+                return json.loads(self.query_intent)
+            except:
+                return {}
+        return {}
+
+    def set_query_intent(self, intent_dict):
+        """Set query intent from dictionary"""
+        if intent_dict:
+            self.query_intent = json.dumps(intent_dict)
+        else:
+            self.query_intent = None
 
 
 # Create tables
@@ -139,9 +190,12 @@ def log_processing_step(db, document_id: int, step_name: str,
             step_name=step_name,
             step_status=status,
             step_duration=duration,
-            step_details=details,
             error_message=error
         )
+
+        if details:
+            log_entry.set_step_details(details)
+
         db.add(log_entry)
         db.commit()
     except Exception as e:
@@ -155,9 +209,12 @@ def save_chunk_analysis(db, document_id: int, analysis_type: str,
         analysis = ChunkAnalysis(
             document_id=document_id,
             analysis_type=analysis_type,
-            analysis_result=analysis_result,
             processing_time=processing_time
         )
+
+        if analysis_result:
+            analysis.set_analysis_result(analysis_result)
+
         db.add(analysis)
         db.commit()
     except Exception as e:
@@ -170,11 +227,14 @@ def log_query_analysis(db, query_text: str, intent: dict, strategy: str,
     try:
         query_log = QueryAnalysis(
             query_text=query_text,
-            query_intent=intent,
             search_strategy=strategy,
             results_count=results_count,
             response_time=response_time
         )
+
+        if intent:
+            query_log.set_query_intent(intent)
+
         db.add(query_log)
         db.commit()
     except Exception as e:
