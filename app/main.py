@@ -11,6 +11,8 @@ from typing import Optional, Dict, Any, List
 
 from app.services.pdf_processor import pdf_processor
 from app.services.vector_service import vector_service
+from fastapi.responses import StreamingResponse
+from app.services.query_enhancement import query_enhancement_service
 
 # Add the parent directory to Python path
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -189,6 +191,142 @@ async def upload_file(file: UploadFile = File(...), db: Session = Depends(get_db
         print(f"❌ Upload error: {str(e)}")
         traceback.print_exc()
         raise HTTPException(status_code=500, detail=f"Upload failed: {str(e)}")
+
+
+@app.post("/search/enhanced")
+async def enhanced_search_documents(request: dict, db: Session = Depends(get_db)):
+    """Enhanced search with AI-powered answer generation"""
+    start_time = time.time()
+
+    try:
+        query_text = request.get("query", "")
+        limit = request.get("limit", 5)
+        include_enhancement = request.get("enhance", True)
+
+        if not query_text:
+            raise HTTPException(status_code=400, detail="Query text is required")
+
+        print(f"🔍 Enhanced search query: '{query_text}'")
+
+        # Generate embedding for the query
+        query_embeddings = pdf_processor.generate_embeddings([query_text])
+        query_embedding = query_embeddings[0]
+
+        # Perform search
+        results = vector_service.search_similar(query_embedding, limit=limit)
+        response_time = time.time() - start_time
+
+        if include_enhancement and results:
+            # Use query enhancement service
+            enhanced_response = query_enhancement_service.enhance_search_results(
+                query_text, results
+            )
+
+            # Add timing information
+            enhanced_response["response_time"] = response_time
+
+            # Generate follow-up questions
+            follow_ups = query_enhancement_service.generate_follow_up_questions(
+                query_text, enhanced_response["enhanced_response"]
+            )
+            enhanced_response["enhanced_response"]["follow_up_questions"] = follow_ups
+
+            return enhanced_response
+        else:
+            return {
+                "query": query_text,
+                "results": results,
+                "total_found": len(results),
+                "response_time": response_time,
+                "enhanced": False
+            }
+
+    except Exception as e:
+        response_time = time.time() - start_time
+        print(f"❌ Enhanced search error: {e}")
+        raise HTTPException(status_code=500, detail=f"Enhanced search failed: {str(e)}")
+
+
+@app.get("/search/stream")
+async def stream_search_results(
+        query: str = Query(..., description="Search query"),
+        limit: int = Query(5, description="Number of results to return")
+):
+    """Stream enhanced search results in real-time"""
+    try:
+        if not query:
+            raise HTTPException(status_code=400, detail="Query parameter is required")
+
+        print(f"🔍 Streaming search for: '{query}'")
+
+        # Generate embedding for the query
+        query_embeddings = pdf_processor.generate_embeddings([query])
+        query_embedding = query_embeddings[0]
+
+        # Search in Qdrant
+        results = vector_service.search_similar(query_embedding, limit=limit)
+
+        if not results:
+            async def no_results_generator():
+                yield f"data: {json.dumps({'type': 'no_results', 'message': 'No relevant documents found'})}\n\n"
+
+            return StreamingResponse(
+                no_results_generator(),
+                media_type="text/event-stream",
+                headers={"Cache-Control": "no-cache", "Connection": "keep-alive"}
+            )
+
+        # Stream enhanced results
+        return StreamingResponse(
+            query_enhancement_service.stream_enhanced_results(query, results),
+            media_type="text/event-stream",
+            headers={"Cache-Control": "no-cache", "Connection": "keep-alive"}
+        )
+
+    except Exception as e:
+        async def error_generator():
+            yield f"data: {json.dumps({'type': 'error', 'message': str(e)})}\n\n"
+
+        return StreamingResponse(
+            error_generator(),
+            media_type="text/event-stream"
+        )
+
+
+@app.post("/search/analyze")
+async def analyze_query_intent(request: dict):
+    """Analyze query intent and suggest improvements"""
+    try:
+        query_text = request.get("query", "")
+
+        if not query_text:
+            raise HTTPException(status_code=400, detail="Query text is required")
+
+        # Analyze the query
+        intent_analysis = query_enhancement_service._analyze_query_intent(query_text)
+
+        # Generate query suggestions
+        suggestions = []
+        entities = intent_analysis.get("key_entities", [])
+
+        if intent_analysis["question_type"] == "general_inquiry" and entities:
+            suggestions.append(f"Try being more specific about {entities[0]} if available")
+
+        if intent_analysis["complexity"] == "complex":
+            suggestions.append("Consider breaking this into multiple simpler questions")
+
+        if not entities:
+            suggestions.append("Try including specific keywords related to policies, procedures, or benefits")
+
+        return {
+            "query": query_text,
+            "intent_analysis": intent_analysis,
+            "suggestions": suggestions,
+            "recommended_rephrasing": []
+        }
+
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Query analysis failed: {str(e)}")
 
 
 @app.get("/documents")
@@ -407,13 +545,14 @@ async def process_document_intelligent(doc_id: int, db: Session = Depends(get_db
 
 @app.post("/search")
 async def search_documents(request: dict, db: Session = Depends(get_db)):
-    """Enhanced search with better debugging"""
+    """Enhanced search with better debugging and optional AI enhancement"""
     start_time = time.time()
 
     try:
         query_text = request.get("query", "")
         limit = request.get("limit", 5)
         debug_mode = request.get("debug", False)
+        enhance_results = request.get("enhance", True)  # New parameter
 
         if not query_text:
             raise HTTPException(status_code=400, detail="Query text is required")
@@ -428,21 +567,24 @@ async def search_documents(request: dict, db: Session = Depends(get_db)):
         if debug_mode:
             search_results = vector_service.search_with_debug(query_embedding, limit=limit)
             results = search_results.get("results", [])
-            debug_info = {
-                k: v for k, v in search_results.items() if k != "results"
-            }
+            debug_info = {k: v for k, v in search_results.items() if k != "results"}
         else:
             results = vector_service.search_similar(query_embedding, limit=limit)
             debug_info = {}
 
         response_time = time.time() - start_time
 
-        # Log query
-        log_query_analysis(
-            db, query_text, {},
-            "standard", len(results), response_time
-        )
+        # Enhanced response if requested and results found
+        if enhance_results and results:
+            enhanced_response = query_enhancement_service.enhance_search_results(
+                query_text, results
+            )
+            enhanced_response["response_time"] = response_time
+            if debug_mode:
+                enhanced_response["debug_info"] = debug_info
+            return enhanced_response
 
+        # Standard response
         response = {
             "query": query_text,
             "results": results,
@@ -458,15 +600,7 @@ async def search_documents(request: dict, db: Session = Depends(get_db)):
     except Exception as e:
         response_time = time.time() - start_time
         print(f"❌ Search error: {e}")
-
-        # Log failed query
-        try:
-            log_query_analysis(db, query_text, {}, "failed", 0, response_time)
-        except:
-            pass
-
         raise HTTPException(status_code=500, detail=f"Search failed: {str(e)}")
-
 
 @app.get("/analytics/documents")
 def get_document_analytics(db: Session = Depends(get_db)):

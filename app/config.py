@@ -37,8 +37,8 @@ class Settings:
         self.log_dir = os.getenv('LOG_DIR', './data/logs')
 
         # Application Settings
-        self.app_name = os.getenv('APP_NAME', 'Policy Document AI')
-        self.app_version = os.getenv('APP_VERSION', '2.0.0')  # Updated version
+        self.app_name = os.getenv('APP_NAME', 'Enhanced Policy Document AI')
+        self.app_version = os.getenv('APP_VERSION', '2.0.0')
         self.debug = os.getenv('DEBUG', 'True').lower() == 'true'
         self.log_level = os.getenv('LOG_LEVEL', 'INFO')
 
@@ -48,16 +48,31 @@ class Settings:
         self.max_tokens = int(os.getenv('MAX_TOKENS', '4000'))
         self.temperature = float(os.getenv('TEMPERATURE', '0.1'))
 
+        # Enhanced Query Processing Configuration
+        self.enable_query_enhancement = os.getenv('ENABLE_QUERY_ENHANCEMENT', 'True').lower() == 'true'
+        self.max_context_length = int(os.getenv('MAX_CONTEXT_LENGTH', '8000'))
+        self.response_streaming = os.getenv('RESPONSE_STREAMING', 'True').lower() == 'true'
+
+        # Enhanced Search Configuration
+        self.semantic_search_threshold = float(os.getenv('SEMANTIC_SEARCH_THRESHOLD', '0.7'))
+        self.max_search_results = int(os.getenv('MAX_SEARCH_RESULTS', '20'))
+        self.enable_follow_up_questions = os.getenv('ENABLE_FOLLOW_UP_QUESTIONS', 'True').lower() == 'true'
+
+        # AI Response Configuration
+        self.ai_response_max_tokens = int(os.getenv('AI_RESPONSE_MAX_TOKENS', '1200'))
+        self.ai_response_temperature = float(os.getenv('AI_RESPONSE_TEMPERATURE', '0.1'))
+        self.enable_structured_extraction = os.getenv('ENABLE_STRUCTURED_EXTRACTION', 'True').lower() == 'true'
+
         # Vector Search Configuration
-        self.vector_dimension = int(os.getenv('VECTOR_DIMENSION', '1536'))  # text-embedding-3-small is 1536 dimensions
+        self.vector_dimension = int(os.getenv('VECTOR_DIMENSION', '1536'))
         self.similarity_threshold = float(os.getenv('SIMILARITY_THRESHOLD', '0.7'))
         self.max_chunks_per_query = int(os.getenv('MAX_CHUNKS_PER_QUERY', '10'))
 
         # Intelligent Chunking Configuration
         self.enable_intelligent_chunking = os.getenv('ENABLE_INTELLIGENT_CHUNKING', 'True').lower() == 'true'
-        self.max_chunk_size = int(os.getenv('MAX_CHUNK_SIZE', '1200'))  # characters
-        self.min_chunk_size = int(os.getenv('MIN_CHUNK_SIZE', '300'))  # characters
-        self.chunk_overlap = int(os.getenv('CHUNK_OVERLAP', '200'))  # characters
+        self.max_chunk_size = int(os.getenv('MAX_CHUNK_SIZE', '1200'))
+        self.min_chunk_size = int(os.getenv('MIN_CHUNK_SIZE', '300'))
+        self.chunk_overlap = int(os.getenv('CHUNK_OVERLAP', '200'))
         self.semantic_analysis_enabled = os.getenv('SEMANTIC_ANALYSIS_ENABLED', 'True').lower() == 'true'
         self.hierarchical_chunking_enabled = os.getenv('HIERARCHICAL_CHUNKING_ENABLED', 'True').lower() == 'true'
 
@@ -68,27 +83,22 @@ class Settings:
 
         # Context Enhancement Configuration
         self.enable_context_enhancement = os.getenv('ENABLE_CONTEXT_ENHANCEMENT', 'True').lower() == 'true'
-        self.context_window_size = int(os.getenv('CONTEXT_WINDOW_SIZE', '2'))  # chunks before/after
+        self.context_window_size = int(os.getenv('CONTEXT_WINDOW_SIZE', '2'))
         self.enable_relationship_mapping = os.getenv('ENABLE_RELATIONSHIP_MAPPING', 'True').lower() == 'true'
 
         # Search Enhancement Configuration
-        self.enable_query_enhancement = os.getenv('ENABLE_QUERY_ENHANCEMENT', 'True').lower() == 'true'
         self.enable_intent_analysis = os.getenv('ENABLE_INTENT_ANALYSIS', 'True').lower() == 'true'
         self.enable_context_expansion = os.getenv('ENABLE_CONTEXT_EXPANSION', 'True').lower() == 'true'
 
         # Performance Configuration
-        self.embedding_batch_size = int(os.getenv('EMBEDDING_BATCH_SIZE', '50'))  # Reduced for stability
-        self.llm_processing_timeout = int(os.getenv('LLM_PROCESSING_TIMEOUT', '120'))  # seconds
+        self.embedding_batch_size = int(os.getenv('EMBEDDING_BATCH_SIZE', '50'))
+        self.llm_processing_timeout = int(os.getenv('LLM_PROCESSING_TIMEOUT', '120'))
         self.max_concurrent_requests = int(os.getenv('MAX_CONCURRENT_REQUESTS', '5'))
 
-        # Fallback Configuration
-        self.enable_fallback_chunking = os.getenv('ENABLE_FALLBACK_CHUNKING', 'True').lower() == 'true'
-        self.fallback_chunk_method = os.getenv('FALLBACK_CHUNK_METHOD', 'paragraph')  # paragraph, sentence, token
-
-        # Monitoring and Logging
-        self.enable_chunking_metrics = os.getenv('ENABLE_CHUNKING_METRICS', 'True').lower() == 'true'
-        self.log_chunk_statistics = os.getenv('LOG_CHUNK_STATISTICS', 'True').lower() == 'true'
-        self.save_chunking_analysis = os.getenv('SAVE_CHUNKING_ANALYSIS', 'True').lower() == 'true'
+        # Advanced Features
+        self.enable_section_detection = os.getenv('ENABLE_SECTION_DETECTION', 'True').lower() == 'true'
+        self.enable_table_extraction = os.getenv('ENABLE_TABLE_EXTRACTION', 'True').lower() == 'true'
+        self.enable_multilingual_support = os.getenv('ENABLE_MULTILINGUAL_SUPPORT', 'False').lower() == 'true'
 
         # Server Configuration
         self.api_host = os.getenv('API_HOST', '0.0.0.0')
@@ -98,37 +108,6 @@ class Settings:
         # Security
         self.secret_key = os.getenv('SECRET_KEY', 'change-this-secret-key')
         self.allowed_hosts = os.getenv('ALLOWED_HOSTS', 'localhost,127.0.0.1').split(',')
-
-        # Advanced Features
-        self.enable_multilingual_support = os.getenv('ENABLE_MULTILINGUAL_SUPPORT', 'False').lower() == 'true'
-        self.enable_document_versioning = os.getenv('ENABLE_DOCUMENT_VERSIONING', 'False').lower() == 'true'
-        self.enable_audit_trail = os.getenv('ENABLE_AUDIT_TRAIL', 'True').lower() == 'true'
-
-        # Additional Features for Compatibility (added these)
-        self.enable_structured_extraction = os.getenv('ENABLE_STRUCTURED_EXTRACTION', 'True').lower() == 'true'
-        self.enable_section_detection = os.getenv('ENABLE_SECTION_DETECTION', 'True').lower() == 'true'
-        self.enable_table_extraction = os.getenv('ENABLE_TABLE_EXTRACTION', 'True').lower() == 'true'
-
-        # Processing Configuration
-        self.max_file_size_mb = int(os.getenv('MAX_FILE_SIZE_MB', '50'))  # Maximum file size in MB
-        self.processing_batch_size = int(os.getenv('PROCESSING_BATCH_SIZE', '10'))  # Chunks per batch
-
-        # Error Handling Configuration
-        self.retry_attempts = int(os.getenv('RETRY_ATTEMPTS', '3'))
-        self.retry_delay = float(os.getenv('RETRY_DELAY', '1.0'))  # seconds
-        self.enable_graceful_degradation = os.getenv('ENABLE_GRACEFUL_DEGRADATION', 'True').lower() == 'true'
-
-        # Feature flags for safe deployment
-        self.enable_experimental_features = os.getenv('ENABLE_EXPERIMENTAL_FEATURES', 'False').lower() == 'true'
-        self.enable_beta_chunking = os.getenv('ENABLE_BETA_CHUNKING', 'False').lower() == 'true'
-
-        # Caching Configuration
-        self.enable_embedding_cache = os.getenv('ENABLE_EMBEDDING_CACHE', 'True').lower() == 'true'
-        self.cache_ttl_hours = int(os.getenv('CACHE_TTL_HOURS', '24'))  # Cache time-to-live
-
-        # Rate Limiting
-        self.api_rate_limit_per_minute = int(os.getenv('API_RATE_LIMIT_PER_MINUTE', '60'))
-        self.embedding_rate_limit_per_minute = int(os.getenv('EMBEDDING_RATE_LIMIT_PER_MINUTE', '1000'))
 
         # Debug and status output
         self._print_startup_info()
@@ -142,137 +121,41 @@ class Settings:
         print(f"🔑 LlamaParse key loaded: {len(self.llamaparse_api_key)} chars")
         print(f"🗄️ Database: {self.db_host}:{self.db_port}/{self.db_name}")
         print(f"🔍 Qdrant URL: {self.qdrant_url}")
-        print(f"🧠 Intelligent chunking: {'✅ Enabled' if self.enable_intelligent_chunking else '❌ Disabled'}")
-        print(f"📊 Semantic analysis: {'✅ Enabled' if self.semantic_analysis_enabled else '❌ Disabled'}")
-        print(f"🏗️ Hierarchical chunking: {'✅ Enabled' if self.hierarchical_chunking_enabled else '❌ Disabled'}")
-        print(f"💡 Query enhancement: {'✅ Enabled' if self.enable_query_enhancement else '❌ Disabled'}")
-
-        # Additional feature status
-        if self.debug:
-            print(f"🔧 Debug mode: {'✅ Enabled' if self.debug else '❌ Disabled'}")
-            print(f"📈 Chunking metrics: {'✅ Enabled' if self.enable_chunking_metrics else '❌ Disabled'}")
-            print(f"💾 Analysis saving: {'✅ Enabled' if self.save_chunking_analysis else '❌ Disabled'}")
+        print(f"🧠 Enhanced query processing: {'✅ Enabled' if self.enable_query_enhancement else '❌ Disabled'}")
+        print(f"🔄 Response streaming: {'✅ Enabled' if self.response_streaming else '❌ Disabled'}")
+        print(f"📊 Structured extraction: {'✅ Enabled' if self.enable_structured_extraction else '❌ Disabled'}")
+        print(f"🎯 Follow-up questions: {'✅ Enabled' if self.enable_follow_up_questions else '❌ Disabled'}")
 
     def _create_directories(self):
         """Create necessary directories"""
         try:
-            # Basic directories
             os.makedirs(self.upload_dir, exist_ok=True)
             os.makedirs(self.vector_dir, exist_ok=True)
             os.makedirs(self.cache_dir, exist_ok=True)
             os.makedirs(self.log_dir, exist_ok=True)
 
-            # Analysis directories
-            if self.save_chunking_analysis:
-                os.makedirs(os.path.join(self.cache_dir, 'analysis'), exist_ok=True)
-                os.makedirs(os.path.join(self.cache_dir, 'chunks'), exist_ok=True)
-                os.makedirs(os.path.join(self.cache_dir, 'embeddings'), exist_ok=True)
-
-            # Processing directories
-            os.makedirs(os.path.join(self.cache_dir, 'processing'), exist_ok=True)
-            os.makedirs(os.path.join(self.log_dir, 'errors'), exist_ok=True)
+            # Enhanced directories
+            os.makedirs(os.path.join(self.cache_dir, 'query_analysis'), exist_ok=True)
+            os.makedirs(os.path.join(self.cache_dir, 'structured_data'), exist_ok=True)
 
             print("✅ All directories created successfully")
-
         except Exception as e:
             print(f"⚠️ Warning: Could not create some directories: {e}")
 
-    def get_max_file_size_bytes(self):
-        """Get maximum file size in bytes"""
-        return self.max_file_size_mb * 1024 * 1024
-
-    def is_feature_enabled(self, feature_name: str) -> bool:
-        """Check if a feature is enabled with safe fallback"""
-        try:
-            return getattr(self, feature_name, False)
-        except AttributeError:
-            return False
-
-    def get_chunking_config(self) -> dict:
-        """Get chunking configuration as dictionary"""
+    def get_enhanced_features(self) -> dict:
+        """Get all enhanced feature flags"""
         return {
-            "enabled": self.enable_intelligent_chunking,
-            "max_chunk_size": self.max_chunk_size,
-            "min_chunk_size": self.min_chunk_size,
-            "overlap": self.chunk_overlap,
+            "query_enhancement": self.enable_query_enhancement,
+            "response_streaming": self.response_streaming,
+            "structured_extraction": self.enable_structured_extraction,
+            "follow_up_questions": self.enable_follow_up_questions,
+            "intent_analysis": self.enable_intent_analysis,
+            "context_expansion": self.enable_context_expansion,
+            "intelligent_chunking": self.enable_intelligent_chunking,
             "semantic_analysis": self.semantic_analysis_enabled,
-            "hierarchical": self.hierarchical_chunking_enabled,
-            "fallback_enabled": self.enable_fallback_chunking,
-            "fallback_method": self.fallback_chunk_method
+            "hierarchical_chunking": self.hierarchical_chunking_enabled
         }
-
-    def get_openai_config(self) -> dict:
-        """Get OpenAI configuration as dictionary"""
-        return {
-            "model": self.openai_model,
-            "embedding_model": self.embedding_model,
-            "max_tokens": self.max_tokens,
-            "temperature": self.temperature,
-            "analysis_model": self.llm_analysis_model,
-            "analysis_tokens": self.max_analysis_tokens,
-            "analysis_temperature": self.analysis_temperature
-        }
-
-    def get_vector_config(self) -> dict:
-        """Get vector database configuration as dictionary"""
-        return {
-            "url": self.qdrant_url,
-            "dimension": self.vector_dimension,
-            "similarity_threshold": self.similarity_threshold,
-            "max_chunks_per_query": self.max_chunks_per_query
-        }
-
-    def validate_configuration(self) -> dict:
-        """Validate configuration and return status"""
-        status = {
-            "valid": True,
-            "errors": [],
-            "warnings": []
-        }
-
-        # Check API keys
-        if not self.openai_api_key or len(self.openai_api_key) < 20:
-            status["errors"].append("OpenAI API key missing or invalid")
-            status["valid"] = False
-
-        if not self.llamaparse_api_key or len(self.llamaparse_api_key) < 20:
-            status["errors"].append("LlamaParse API key missing or invalid")
-            status["valid"] = False
-
-        # Check database configuration
-        if not all([self.db_host, self.db_user, self.db_password, self.db_name]):
-            status["errors"].append("Database configuration incomplete")
-            status["valid"] = False
-
-        # Check Qdrant configuration
-        if not self.qdrant_url or not self.qdrant_api_key:
-            status["errors"].append("Qdrant configuration missing")
-            status["valid"] = False
-
-        # Warnings for performance
-        if self.embedding_batch_size > 100:
-            status["warnings"].append("Large embedding batch size may cause rate limiting")
-
-        if self.max_chunk_size > 2000:
-            status["warnings"].append("Large chunk size may affect embedding quality")
-
-        return status
 
 
 # Create global settings instance
 settings = Settings()
-
-# Validate configuration on import
-config_status = settings.validate_configuration()
-if not config_status["valid"]:
-    print("❌ Configuration validation failed:")
-    for error in config_status["errors"]:
-        print(f"  - {error}")
-
-if config_status["warnings"]:
-    print("⚠️ Configuration warnings:")
-    for warning in config_status["warnings"]:
-        print(f"  - {warning}")
-
-if config_status["valid"]:
-    print("✅ Configuration validation passed")
